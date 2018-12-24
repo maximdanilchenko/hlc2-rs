@@ -1,22 +1,19 @@
 extern crate actix_web;
 extern crate zip;
 
-use std::io::{self, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::fs::File;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use futures::Future;
 use actix_web::{Path, State, server, App, HttpRequest, HttpResponse,
-                HttpMessage, error, Error, AsyncResponder, Json, Query};
+                Json, Query};
 use actix_web::http::{Method, StatusCode};
 #[macro_use]
 extern crate serde_derive;
-#[macro_use]
-extern crate json;
 
 
 struct AppState {
@@ -27,7 +24,8 @@ struct DataBase {
     interests: Vec<String>,
     countries: Vec<String>,
     cities: Vec<String>,
-    accounts: Vec<Account>,
+    accounts: HashMap<u32, Account>,
+    emails: HashSet<String>,
 }
 
 impl DataBase {
@@ -36,7 +34,8 @@ impl DataBase {
             interests: Vec::new(),
             countries: Vec::new(),
             cities: Vec::new(),
-            accounts: Vec::new()
+            accounts: HashMap::new(),
+            emails: HashSet::new()
         }
     }
 
@@ -50,7 +49,6 @@ impl DataBase {
         let mut index = 1;
         loop {
             let file_name = format!("accounts_{}.json", index);
-            println!("Reading from file: {:?}", file_name);
 
             let mut data_file = match zip.by_name(file_name.as_str()) {
                 Ok(f) => f,
@@ -63,8 +61,14 @@ impl DataBase {
             let mut accounts: HashMap<String, Vec<AccountFull>> = serde_json::from_str(&data).unwrap();
 
             for account in accounts.remove("accounts").unwrap() {
-                database.insert(account);
+                match database.insert(account, false) {
+                    Err(_) => println!("Error while inserting"),
+                    Ok(_) => ()
+                }
             }
+
+            println!("Ready file: {:?}", file_name);
+            database.print_len();
 
             index += 1;
         };
@@ -72,19 +76,16 @@ impl DataBase {
 
     }
 
-    fn has_id(&self, uid: &u32) -> Result<u32, ()>{
-         match self.accounts.iter().position(|acc| acc.id == *uid) {
-            Some(index) => Ok(index as u32),
-            None => Err(())
-        }
+    fn print_len(&self) {
+        println!("Accounts num: {}", self.accounts.len());
     }
 
     fn validate_email(&self, email: &String) -> Result<(), ()>{
         match email.find('@') {
             None => Err(()),
-            Some(_) => match self.accounts.iter().position(|acc| acc.email == *email) {
-                Some(index) => Err(()),
-                None => Ok(())
+            Some(_) => match self.emails.contains(email) {
+                true => Err(()),
+                false => Ok(())
             }
         }
     }
@@ -153,14 +154,12 @@ impl DataBase {
         Ok(interests)
     }
 
-    fn update(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
+    fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
 
-        let account_index = match self.has_id(&uid) {
-            Err(_) => return Err(StatusCode::NOT_FOUND),
-            Ok(index) => index as usize
+        let mut new_account = match self.accounts.get(&uid){
+            None => return Err(StatusCode::NOT_FOUND),
+            Some(val) => val.clone()
         };
-
-        let mut new_account = self.accounts[account_index].clone();
 
         match account.email {
             Some(val) => match self.validate_email(&val) {
@@ -212,21 +211,25 @@ impl DataBase {
             None => ()
         };
 
-        self.accounts[account_index] = new_account;
+        self.emails.insert(new_account.email.clone());
+
+        self.accounts.insert(uid, new_account);
 
         Ok(uid)
     }
 
-    fn insert(&mut self, account: AccountFull) -> Result<u32, StatusCode> {
+    fn insert(&mut self, account: AccountFull, with_unique: bool) -> Result<u32, StatusCode> {
         let uid = account.id;
 
-        if let Ok(_) = self.has_id(&uid) {
-            return Err(StatusCode::BAD_REQUEST)
-        };
+        if with_unique {
+            if let true = self.accounts.contains_key(&uid) {
+                return Err(StatusCode::BAD_REQUEST)
+            };
 
-        if let Err(_) = self.validate_email(&account.email) {
-            return Err(StatusCode::BAD_REQUEST)
-        };
+            if let Err(_) = self.validate_email(&account.email) {
+                return Err(StatusCode::BAD_REQUEST)
+            };
+        }
 
         let sex = match self.validate_sex(account.sex.as_str()) {
             Ok(val) => val,
@@ -257,8 +260,9 @@ impl DataBase {
             Some(val) => val
         };
 
-        self.accounts.push(Account{
-            id: account.id,
+        self.emails.insert(account.email.clone());
+
+        self.accounts.insert(uid ,Account{
             email: account.email,
             fname: account.fname,
             sname: account.sname,
@@ -276,7 +280,28 @@ impl DataBase {
         Ok(uid)
     }
 
-    fn filter() {
+    fn update_likes(&mut self, likes: LikesRequest) -> Result<(), StatusCode> {
+        let mut ids: HashSet<u32> = HashSet::new();
+
+        for like in likes.likes.iter() {
+            ids.insert(like.likee);
+            ids.insert(like.liker);
+        }
+        for id in ids {
+            if let false = self.accounts.contains_key(&id) {
+                return Err(StatusCode::BAD_REQUEST)
+            }
+        }
+
+        for like in likes.likes.iter() {
+            self.accounts.get_mut(&like.liker).unwrap().likes.push(
+                Likes{id: like.likee, ts: like.ts})
+        }
+
+        Ok(())
+    }
+
+    fn filter(&self, filters: Filters) {
 
     }
 }
@@ -289,7 +314,6 @@ enum Status { Free, Muted, AllHard }
 
 #[derive(Debug, Clone)]
 struct Account {
-    id: u32,
     email: String,
     fname: Option<String>,
     sname: Option<String>,
@@ -354,6 +378,20 @@ struct Likes {
     ts: i64
 }
 
+#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize)]
+struct LikerLikee {
+    liker: u32,
+    likee: u32,
+    ts: i64
+}
+
+#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize)]
+struct LikesRequest {
+    likes: Vec<LikerLikee>
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Filters {
     sex_eq: Option<String>,
@@ -389,23 +427,27 @@ fn index(req: &HttpRequest<AppState>) -> HttpResponse {
 }
 
 
-fn filter(query: Query<Filters>,state: State<AppState>) -> HttpResponse {
-    println!("Query: {:?}", query);
+fn filter(query: Query<Filters>, state: State<AppState>) -> HttpResponse {
+//    println!("Query: {:?}", query);
     HttpResponse::build(StatusCode::OK)
         .content_type("application/json")
         .body("{}")
 }
 
 
-fn likes(req: &HttpRequest<AppState>) -> HttpResponse {
-    HttpResponse::build(StatusCode::ACCEPTED)
+fn likes(item: Json<LikesRequest>, state: State<AppState>) -> HttpResponse {
+    let mut database = state.database.lock().unwrap();
+    match database.update_likes(item.0) {
+        Ok(_) => HttpResponse::build(StatusCode::ACCEPTED)
         .content_type("application/json")
-        .body("{}")
+        .body("{}"),
+        Err(status) => HttpResponse::build(status).finish()
+    }
 }
 
 fn update(item: Json<AccountOptional>, path: Path<(u32,)>, state: State<AppState>) -> HttpResponse {
     let mut database = state.database.lock().unwrap();
-    match database.update(path.0, item.0) {
+    match database.update_account(path.0, item.0) {
         Ok(_) => HttpResponse::build(StatusCode::ACCEPTED)
             .content_type("application/json")
             .body("{}"),
@@ -415,7 +457,7 @@ fn update(item: Json<AccountOptional>, path: Path<(u32,)>, state: State<AppState
 
 fn new(item: Json<AccountFull>, state: State<AppState>) -> HttpResponse  {
     let mut database = state.database.lock().unwrap();
-    match database.insert(item.0) {
+    match database.insert(item.0, true) {
         Ok(_) => HttpResponse::build(StatusCode::CREATED)
             .content_type("application/json")
             .body("{}"),
@@ -430,6 +472,7 @@ fn main() {
 
     let sys = actix::System::new("accounts");
     let database = Arc::new(Mutex::new(DataBase::from_file(data_file)));
+    println!("Database ready!");
     server::new(move || {
         App::with_state(AppState{database: database.clone()})
             .prefix("/accounts")
@@ -438,7 +481,7 @@ fn main() {
             .resource("/{id}/recommend/", |r| r.method(Method::GET).f(index))
             .resource("/{id}/suggest/", |r| r.method(Method::GET).f(index))
             .resource("/new/", |r| r.method(Method::POST).with(new))
-            .resource("/likes/", |r| r.method(Method::POST).f(likes))
+            .resource("/likes/", |r| r.method(Method::POST).with(likes))
             .resource("/{id}/", |r| r.method(Method::POST).with(update))
     }).keep_alive(120)
         .bind(addr)
