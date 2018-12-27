@@ -17,11 +17,13 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::ops::Bound::Excluded;
 
 use actix_web::{App, HttpRequest, HttpResponse, Json, Path, Query,
                 server, State};
 use actix_web::http::{Method, StatusCode};
 use validator::Validate;
+use itertools::Itertools;
 
 use chrono::{Utc, Datelike, TimeZone};
 
@@ -31,14 +33,14 @@ struct AppState {
 }
 
 struct DataBase {
-    interests: Vec<String>,
-    countries: Vec<String>,
-    cities: Vec<String>,
+    interests: BTreeMap<String, BTreeSet<u32>>,
+    countries: HashMap<String, BTreeSet<u32>>,
+    cities: HashMap<String, BTreeSet<u32>>,
     accounts: BTreeMap<u32, Account>,
-    emails: HashSet<String>,
+    emails: BTreeMap<String, u32>,
     hash_sex: HashMap<Sex, BTreeSet<u32>>,
     hash_status: HashMap<Status, BTreeSet<u32>>,
-
+    hash_codes: HashMap<u16, BTreeSet<u32>>,
 }
 
 impl DataBase {
@@ -52,12 +54,13 @@ impl DataBase {
         hash_status.insert(Status::AllHard, BTreeSet::new());
         DataBase {
             accounts: BTreeMap::new(),
-            interests: Vec::new(),
-            countries: Vec::new(),
-            cities: Vec::new(),
-            emails: HashSet::new(),
+            interests: BTreeMap::new(),
+            countries: HashMap::new(),
+            cities: HashMap::new(),
+            emails: BTreeMap::new(),
             hash_sex,
             hash_status,
+            hash_codes: HashMap::new(),
 
         }
     }
@@ -107,148 +110,110 @@ impl DataBase {
         println!("Emails total num: {}", self.emails.len());
     }
 
-    fn validate_email(&self, email: &String) -> Result<(), ()> {
-        match self.emails.contains(email) {
-            true => Err(()),
-            false => Ok(())
-        }
+    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
+//        self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
     }
 
-
-    fn validate_country(&mut self, row: Option<String>) -> Result<Option<usize>, ()> {
-        match row {
-            Some(s) => {
-                match self.countries.binary_search(&s) {
-                    Ok(index) => Ok(Some(index)),
-                    Err(_) => {
-//                        self.countries.push(s);
-                        Ok(Some(self.countries.len()))
-                    }
-                }
-            }
-            None => Ok(None)
-        }
+    fn delete_from_codes(&mut self, uid: &u32, phone: String) {
+//        self.countries.entry(country).and_modify(|set|
+//            { set.remove(uid); }
+//        );
     }
 
-    fn validate_city(&mut self, row: Option<String>) -> Result<Option<usize>, ()> {
-        match row {
-            Some(s) => {
-                match self.cities.binary_search(&s) {
-                    Ok(index) => Ok(Some(index)),
-                    Err(_) => {
-//                        self.cities.push(s);
-                        Ok(Some(self.cities.len()))
-                    }
-                }
-            }
-            None => Ok(None)
-        }
+    fn insert_to_country(&mut self, uid: &u32, country: String) {
+        self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
     }
 
-    fn validate_interests(&mut self, row: Vec<String>) -> Result<Vec<usize>, ()> {
-        let mut interests: Vec<usize> = Vec::new();
-        for elem in row {
-            if elem.len() > 100 { return Err(()); }
-            interests.push(match self.interests.binary_search(&elem) {
-                Ok(index) => index,
-                Err(_) => {
-//                    self.interests.push(elem);
-                    self.interests.len()
-                }
-            })
+    fn delete_from_country(&mut self, uid: &u32, country: String) {
+        self.countries.entry(country).and_modify(|set|
+            { set.remove(uid); }
+        );
+    }
+
+    fn insert_to_city(&mut self, uid: &u32, city: String) {
+        self.cities.entry(city).or_insert(BTreeSet::new()).insert(uid.clone());
+    }
+
+    fn delete_from_city(&mut self, uid: &u32, city: String) {
+        self.cities.entry(city).and_modify(|set|
+            { set.remove(uid); }
+        );
+    }
+
+    fn insert_to_interests(&mut self, uid: &u32, interests: Vec<String>) {
+        for elem in interests {
+            self.interests.entry(elem).or_insert(BTreeSet::new()).insert(uid.clone());
         }
-        Ok(interests)
     }
 
     fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
-        let mut new_account = match self.accounts.get(&uid) {
-            None => return Err(StatusCode::NOT_FOUND),
-            Some(val) => val.clone()
+        let mut new_account = match self.accounts.get_mut(&uid) {
+            Some(account) => account,
+            None => return Err(StatusCode::NOT_FOUND)
         };
 
-        match account.email {
-            Some(val) => match self.validate_email(&val) {
-                Ok(_) => new_account.email = val,
-                Err(_) => { if new_account.email != val { return Err(StatusCode::BAD_REQUEST); } }
-            }
-            None => ()
+        if let Some(email) = account.email {
+            match self.emails.get(&email) {
+                None => (),
+                Some(other_uid) => {
+                    if *other_uid != uid {
+                        return Err(StatusCode::BAD_REQUEST);
+                    };
+                }
+            };
+            new_account.email = email.clone();
+            self.emails.insert(email, uid);
         };
 
-        match account.sex {
-            None => (),
-            Some(val) => new_account.sex = val
+        if let Some(sex) = account.sex {
+            new_account.sex = sex;
         };
 
-        match account.status {
-            None => (),
-            Some(val) => new_account.status = val
+        if let Some(status) = account.status {
+            new_account.status = status;
         };
 
-
-        match account.country {
-            Some(val) => match self.validate_country(Some(val)) {
-                Ok(val) => new_account.country = val,
-                Err(_) => return Err(StatusCode::BAD_REQUEST)
-            }
-            None => ()
+        if let Some(fname) = account.fname {
+            new_account.fname = Some(fname);
         };
 
-
-        match account.city {
-            Some(val) => match self.validate_city(Some(val)) {
-                Ok(val) => new_account.city = val,
-                Err(_) => return Err(StatusCode::BAD_REQUEST)
-            }
-            None => ()
+        if let Some(sname) = account.sname {
+            new_account.sname = Some(sname);
         };
 
-        match account.interests {
-            Some(val) => match self.validate_interests(val) {
-                Ok(val) => new_account.interests.extend(val),
-                Err(_) => return Err(StatusCode::BAD_REQUEST)
-            },
-            None => ()
+        if let Some(phone) = account.phone {
+            new_account.phone = Some(phone);
         };
 
+        if let Some(birth) = account.birth {
+            new_account.birth = birth;
+        };
 
-        match account.fname {
-            None => (),
-            Some(val) => new_account.fname = Some(val)
-        }
+        if let Some(joined) = account.joined {
+            new_account.joined = joined;
+        };
 
-        match account.sname {
-            None => (),
-            Some(val) => new_account.sname = Some(val)
-        }
+        if let Some(premium) = account.premium {
+            new_account.premium = Some(premium);
+        };
 
-        match account.phone {
-            None => (),
-            Some(val) => new_account.phone = Some(val)
-        }
+        if let Some(likes) = account.likes {
+            new_account.likes.extend(likes);
+        };
 
-        match account.birth {
-            None => (),
-            Some(val) => new_account.birth = val
-        }
+        if let Some(city) = account.city {
+            self.delete_from_city(&uid, city.clone());
+            self.insert_to_city(&uid, city);
+        };
 
-        match account.joined {
-            None => (),
-            Some(val) => new_account.joined = val
-        }
+        if let Some(country) = account.country {
+            self.delete_from_country(&uid, country.clone());
+            self.insert_to_country(&uid, country);
+        };
 
-        match account.premium {
-            None => (),
-            Some(val) => new_account.premium = Some(val)
-        }
-
-        match account.likes {
-            None => (),
-            Some(val) => new_account.likes.extend(val)
-        }
-
-        self.emails.insert(new_account.email.clone());
-
-        self.accounts.insert(uid, new_account);
+        if let Some(interests) = account.interests {
+            self.insert_to_interests(&uid, interests);
+        };
 
         Ok(uid)
     }
@@ -261,36 +226,40 @@ impl DataBase {
                 return Err(StatusCode::BAD_REQUEST);
             };
 
-            if let Err(_) = self.validate_email(&account.email) {
+            if self.emails.contains_key(&account.email) {
                 return Err(StatusCode::BAD_REQUEST);
             };
         }
-
-        let country = match self.validate_country(account.country) {
-            Ok(val) => val,
-            Err(_) => return Err(StatusCode::BAD_REQUEST)
-        };
-        let city = match self.validate_city(account.city) {
-            Ok(val) => val,
-            Err(_) => return Err(StatusCode::BAD_REQUEST)
-        };
-        let interests = match account.interests {
-            None => Vec::new(),
-            Some(val) => match self.validate_interests(val) {
-                Ok(val) => val,
-                Err(_) => return Err(StatusCode::BAD_REQUEST)
-            }
-        };
 
         let likes = match account.likes {
             None => Vec::new(),
             Some(val) => val
         };
 
+        let city = match account.city {
+            Some(city) => {
+                self.insert_to_city(&uid, city.clone());
+                Some(city)
+            }
+            None => None
+        };
+
+        let country = match account.country {
+            Some(country) => {
+                self.insert_to_country(&uid, country.clone());
+                Some(country)
+            }
+            None => None
+        };
+
+        if let Some(val) = account.interests {
+            self.insert_to_interests(&uid, val);
+        };
+
         (*self.hash_status.get_mut(&account.status).unwrap()).insert(uid);
         (*self.hash_sex.get_mut(&account.sex).unwrap()).insert(uid);
 
-        self.emails.insert(account.email.clone());
+        self.emails.insert(account.email.clone(), uid);
 
         self.accounts.insert(uid, Account {
             email: account.email,
@@ -299,12 +268,11 @@ impl DataBase {
             phone: account.phone,
             sex: account.sex,
             birth: account.birth,
-            country,
-            city,
             joined: account.joined,
             status: account.status,
-            interests,
             premium: account.premium,
+            country,
+            city,
             likes,
         });
         Ok(uid)
@@ -332,88 +300,109 @@ impl DataBase {
     }
 
     fn filter(&self, filters: Filters) -> Result<serde_json::Value, ()> {
+        let mut ids_filter = BTreeSet::new();
 
-        match &filters.email_domain {
-        Some(val) => {return Ok(json!({"accounts": []}))},
-        None => ()
+        for (filter, data) in [
+            (&filters.city_eq, &self.cities),
+            (&filters.country_eq, &self.countries),
+        ].iter() {
+            match filter {
+                Some(key) => {
+                    match data.get(key) {
+                        Some(vec) => match ids_filter.is_empty() {
+                            true => ids_filter.extend(vec.iter()),
+                            false => {
+                                for elem in &ids_filter {
+                                    if !vec.contains(elem) {
+                                        ids_filter.remove(elem);
+                                    };
+                                };
+                                if ids_filter.is_empty() {
+                                    return Ok(json!({"accounts": []}));
+                                };
+                            }
+                        },
+                        None => return Ok(json!({"accounts": []}))
+                    }
+                }
+                None => ()
+            };
         };
-        match &filters.email_lt {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
+        if let Some(status) = &filters.status_eq {
+            match self.hash_status.get(status) {
+                Some(vec) => match ids_filter.is_empty() {
+                    true => ids_filter.extend(vec.iter()),
+                    false => {
+                        for elem in &ids_filter {
+                            if !vec.contains(elem) {
+                                ids_filter.remove(elem);
+                            };
+                        };
+                        if ids_filter.is_empty() {
+                            return Ok(json!({"accounts": []}));
+                        };
+                    }
+                },
+                None => return Ok(json!({"accounts": []}))
+            }
         };
-        match &filters.email_gt {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
+        if let Some(status) = &filters.status_neq {
+            for val in [Status::Free, Status::Muted, Status::AllHard].iter() {
+                if status != val {
+                    match self.hash_status.get(val) {
+                        Some(vec) => match ids_filter.is_empty() {
+                            true => ids_filter.extend(vec.iter()),
+                            false => {
+                                for elem in &ids_filter {
+                                    if !vec.contains(elem) {
+                                        ids_filter.remove(elem);
+                                    };
+                                };
+                                if ids_filter.is_empty() {
+                                    return Ok(json!({"accounts": []}));
+                                };
+                            }
+                        },
+                        None => return Ok(json!({"accounts": []}))
+                    }
+                }
+            }
         };
-        match &filters.fname_any {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.sname_starts {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.phone_code {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.country_eq {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.country_null {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.city_eq {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.city_any {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.city_null {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.birth_lt {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.birth_gt {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.interests_contains {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.interests_any {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.likes_contains {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.premium_now {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
-        };
-        match &filters.premium_null {
-            Some(val) => {return Ok(json!({"accounts": []}))},
-            None => ()
+        if let Some(sex) = &filters.sex_eq {
+            match self.hash_sex.get(sex) {
+                Some(vec) => match ids_filter.is_empty() {
+                    true => ids_filter.extend(vec.iter()),
+                    false => {
+                        for elem in &ids_filter {
+                            if !vec.contains(elem) {
+                                ids_filter.remove(elem);
+                            };
+                        };
+                        if ids_filter.is_empty() {
+                            return Ok(json!({"accounts": []}));
+                        };
+                    }
+                },
+                None => return Ok(json!({"accounts": []}))
+            }
         };
 
-
-
-        let end_ids: BTreeMap<&u32, &Account> = self.accounts
-            .iter()
-            .rev()
-            .filter(|(_, acc)| filter_one(&filters, acc))
-            .take(filters.limit as usize)
-            .collect();
+        let end_ids: BTreeMap<&u32, &Account> = if ids_filter.is_empty() {
+            self.accounts
+                .iter()
+                .rev()
+                .filter(|(_, acc)| filter_one(&filters, acc))
+                .take(filters.limit as usize)
+                .collect()
+        } else {
+            ids_filter
+                .iter()
+                .rev()
+                .map(|k| (k, self.accounts.get(&k).unwrap()))
+                .filter(|(_, acc)| filter_one(&filters, acc))
+                .take(filters.limit as usize)
+                .collect()
+        };
 
         let mut result = Vec::new();
 
@@ -426,44 +415,58 @@ impl DataBase {
                 elem.insert("sex", json!(acc.sex));
             };
 
-            match filters.status_eq {
-                Some(_) => { elem.insert("status", json!(acc.status)); }
-                None => {
-                    match filters.status_neq {
-                        Some(_) => { elem.insert("status", json!(acc.status)); }
-                        None => ()
-                    };
-                }
+            if let Some(_) = filters.status_eq {
+                elem.insert("status", json!(acc.status));
+            } else if let Some(_) = filters.status_neq {
+                elem.insert("status", json!(acc.status));
             };
 
-            match filters.birth_year {
-                Some(_) => { elem.insert("birth", json!(acc.birth)); }
-                None => {}
+            if let Some(_) = filters.birth_year {
+                elem.insert("birth", json!(acc.birth));
+            } else if let Some(_) = filters.birth_gt {
+                elem.insert("birth", json!(acc.birth));
+            } else if let Some(_) = filters.birth_lt {
+                elem.insert("birth", json!(acc.birth));
             };
 
-            match filters.fname_null {
-                Some(val) => { if val == 0 {elem.insert("fname", json!(acc.fname)); }}
-                None => {
-                    match filters.fname_eq {
-                        Some(_) => { elem.insert("fname", json!(acc.fname)); }
-                        None => ()
-                    };
-                }
+            if let Some(_) = filters.fname_eq {
+                elem.insert("fname", json!(acc.fname));
+            } else if let Some(val) = filters.fname_null {
+                if val == 0 {
+                    elem.insert("fname", json!(acc.fname));
+                };
             };
 
-            match filters.sname_null {
-                Some(val) => { if val == 0 {elem.insert("sname", json!(acc.sname)); }}
-                None => {
-                    match filters.sname_eq {
-                        Some(_) => { elem.insert("sname", json!(acc.sname)); }
-                        None => ()
-                    };
-                }
+            if let Some(_) = filters.sname_eq {
+                elem.insert("sname", json!(acc.sname));
+            } else if let Some(val) = filters.sname_null {
+                if val == 0 {
+                    elem.insert("sname", json!(acc.sname));
+                };
             };
 
-            match filters.phone_null {
-                Some(val) => { if val == 0 {elem.insert("phone", json!(acc.phone)); }}
-                None => {}
+            if let Some(val) = filters.phone_null {
+                if val == 0 {
+                    elem.insert("phone", json!(acc.phone));
+                };
+            };
+
+            if let Some(_) = filters.city_any {
+                elem.insert("city", json!(acc.city));
+            } else if let Some(_) = filters.city_eq {
+                elem.insert("city", json!(acc.city));
+            } else if let Some(val) = filters.city_null {
+                if val == 0 {
+                    elem.insert("city", json!(acc.city));
+                };
+            };
+
+            if let Some(_) = filters.country_eq {
+                elem.insert("country", json!(acc.country));
+            } else if let Some(val) = filters.country_null {
+                if val == 0 {
+                    elem.insert("country", json!(acc.country));
+                };
             };
 
 
@@ -476,29 +479,40 @@ impl DataBase {
 }
 
 fn filter_one(filters: &Filters, account: &Account) -> bool {
-
-    match &filters.status_eq {
-        None => (),
-        Some(val) => {
-            if account.status != *val { return false; }
-        }
-    };
-    match &filters.status_neq {
-        None => (),
-        Some(val) => {
-            if account.status == *val { return false; }
-        }
-    };
-    match &filters.sex_eq {
-        None => (),
-        Some(val) => {
-            if account.sex != *val { return false; }
-        }
-    };
+//    match &filters.status_eq {
+//        None => (),
+//        Some(val) => {
+//            if account.status != *val { return false; }
+//        }
+//    };
+//    match &filters.status_neq {
+//        None => (),
+//        Some(val) => {
+//            if account.status == *val { return false; }
+//        }
+//    };
+//    match &filters.sex_eq {
+//        None => (),
+//        Some(val) => {
+//            if account.sex != *val { return false; }
+//        }
+//    };
     match &filters.birth_year {
         None => (),
         Some(val) => {
             if Utc.timestamp(account.birth, 0).year() != *val { return false; }
+        }
+    };
+    match &filters.birth_gt {
+        None => (),
+        Some(val) => {
+            if account.birth <= *val { return false; }
+        }
+    };
+    match &filters.birth_lt {
+        None => (),
+        Some(val) => {
+            if account.birth >= *val { return false; }
         }
     };
     match &filters.fname_null {
@@ -654,11 +668,10 @@ struct Account {
     phone: Option<String>,
     sex: Sex,
     birth: i64,
-    country: Option<usize>,
-    city: Option<usize>,
+    country: Option<String>,
+    city: Option<String>,
     joined: i64,
     status: Status,
-    interests: Vec<usize>,
     premium: Option<Premium>,
     likes: Vec<Likes>,
 }
@@ -746,41 +759,70 @@ struct LikesRequest {
 #[derive(Debug, Validate, Serialize, Deserialize)]
 struct Filters {
     limit: u32,
+    // +
     sex_eq: Option<Sex>,
+    // +
     email_domain: Option<String>,
+    //
     email_lt: Option<String>,
+    //
     email_gt: Option<String>,
+    //
     status_eq: Option<Status>,
+    // +
     status_neq: Option<Status>,
+    // +
     fname_eq: Option<String>,
+    // +
     fname_any: Option<String>,
+    //
     #[validate(range(min = "0", max = "1"))]
     fname_null: Option<u8>,
+    // +
     sname_eq: Option<String>,
+    // +
     sname_starts: Option<String>,
+    //
     #[validate(range(min = "0", max = "1"))]
     sname_null: Option<u8>,
+    // +
     phone_code: Option<u16>,
+    //
     #[validate(range(min = "0", max = "1"))]
     phone_null: Option<u8>,
+    //
     country_eq: Option<String>,
+    // +
     country_null: Option<u8>,
+    //
     city_eq: Option<String>,
+    // +
     city_any: Option<String>,
+    //
     #[validate(range(min = "0", max = "1"))]
     city_null: Option<u8>,
+    //
     birth_lt: Option<i64>,
+    // +
     birth_gt: Option<i64>,
+    // +
     birth_year: Option<i32>,
+    // +
     interests_contains: Option<String>,
+    //
     interests_any: Option<String>,
+    //
     likes_contains: Option<String>,
+    //
     premium_now: Option<i64>,
+    //
     #[validate(range(min = "0", max = "1"))]
     premium_null: Option<u8>,
+    //
+    query_id: Option<i64>,
 }
 
-fn index(req: &HttpRequest<AppState>) -> HttpResponse {
+fn index(_req: &HttpRequest<AppState>) -> HttpResponse {
     HttpResponse::build(StatusCode::OK)
         .content_type("application/json")
         .body("{\"accounts\": []}")
