@@ -25,3 +25,5 @@ zip = "0.2.6"
 itertools = "0.8"
 
 sys-info = "0.5.6"
+
+chrono = "0.4"
