@@ -17,13 +17,11 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::ops::Bound::Excluded;
 
 use actix_web::{App, HttpRequest, HttpResponse, Json, Path, Query,
                 server, State};
 use actix_web::http::{Method, StatusCode};
 use validator::Validate;
-use itertools::Itertools;
 
 use chrono::{Utc, Datelike, TimeZone};
 
@@ -38,30 +36,18 @@ struct DataBase {
     cities: HashMap<String, BTreeSet<u32>>,
     accounts: BTreeMap<u32, Account>,
     emails: BTreeMap<String, u32>,
-    hash_sex: HashMap<Sex, BTreeSet<u32>>,
-    hash_status: HashMap<Status, BTreeSet<u32>>,
-    hash_codes: HashMap<u16, BTreeSet<u32>>,
+//    hash_codes: HashMap<u16, BTreeSet<u32>>,
 }
 
 impl DataBase {
     fn new() -> DataBase {
-        let mut hash_sex = HashMap::new();
-        hash_sex.insert(Sex::F, BTreeSet::new());
-        hash_sex.insert(Sex::M, BTreeSet::new());
-        let mut hash_status = HashMap::new();
-        hash_status.insert(Status::Free, BTreeSet::new());
-        hash_status.insert(Status::Muted, BTreeSet::new());
-        hash_status.insert(Status::AllHard, BTreeSet::new());
         DataBase {
             accounts: BTreeMap::new(),
             interests: BTreeMap::new(),
             countries: HashMap::new(),
             cities: HashMap::new(),
             emails: BTreeMap::new(),
-            hash_sex,
-            hash_status,
-            hash_codes: HashMap::new(),
-
+//            hash_codes: HashMap::new(),
         }
     }
 
@@ -110,15 +96,15 @@ impl DataBase {
         println!("Emails total num: {}", self.emails.len());
     }
 
-    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
-//        self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
-    }
-
-    fn delete_from_codes(&mut self, uid: &u32, phone: String) {
-//        self.countries.entry(country).and_modify(|set|
-//            { set.remove(uid); }
-//        );
-    }
+//    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
+////        self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
+//    }
+//
+//    fn delete_from_codes(&mut self, uid: &u32, phone: String) {
+////        self.countries.entry(country).and_modify(|set|
+////            { set.remove(uid); }
+////        );
+//    }
 
     fn insert_to_country(&mut self, uid: &u32, country: String) {
         self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
@@ -256,9 +242,6 @@ impl DataBase {
             self.insert_to_interests(&uid, val);
         };
 
-        (*self.hash_status.get_mut(&account.status).unwrap()).insert(uid);
-        (*self.hash_sex.get_mut(&account.sex).unwrap()).insert(uid);
-
         self.emails.insert(account.email.clone(), uid);
 
         self.accounts.insert(uid, Account {
@@ -306,86 +289,27 @@ impl DataBase {
             (&filters.city_eq, &self.cities),
             (&filters.country_eq, &self.countries),
         ].iter() {
-            match filter {
-                Some(key) => {
-                    match data.get(key) {
-                        Some(vec) => match ids_filter.is_empty() {
-                            true => ids_filter.extend(vec.iter()),
-                            false => {
-                                for elem in &ids_filter {
-                                    if !vec.contains(elem) {
-                                        ids_filter.remove(elem);
-                                    };
-                                };
-                                if ids_filter.is_empty() {
-                                    return Ok(json!({"accounts": []}));
-                                };
-                            }
-                        },
-                        None => return Ok(json!({"accounts": []}))
-                    }
+            if let Some(key) = filter {
+                match data.get(key) {
+                    Some(vec) => match ids_filter.is_empty() {
+                        true => ids_filter.extend(vec.iter()),
+                        false => {
+                            let mut new_ids_filter = BTreeSet::new();
+                            for elem in ids_filter.intersection(vec) {
+                                new_ids_filter.insert(elem.clone());
+                            };
+                            if new_ids_filter.is_empty() {
+                                return Ok(json!({"accounts": []}));
+                            };
+                            ids_filter = new_ids_filter;
+                        }
+                    },
+                    None => return Ok(json!({"accounts": []}))
                 }
-                None => ()
             };
         };
-        if let Some(status) = &filters.status_eq {
-            match self.hash_status.get(status) {
-                Some(vec) => match ids_filter.is_empty() {
-                    true => ids_filter.extend(vec.iter()),
-                    false => {
-                        for elem in &ids_filter {
-                            if !vec.contains(elem) {
-                                ids_filter.remove(elem);
-                            };
-                        };
-                        if ids_filter.is_empty() {
-                            return Ok(json!({"accounts": []}));
-                        };
-                    }
-                },
-                None => return Ok(json!({"accounts": []}))
-            }
-        };
-        if let Some(status) = &filters.status_neq {
-            for val in [Status::Free, Status::Muted, Status::AllHard].iter() {
-                if status != val {
-                    match self.hash_status.get(val) {
-                        Some(vec) => match ids_filter.is_empty() {
-                            true => ids_filter.extend(vec.iter()),
-                            false => {
-                                for elem in &ids_filter {
-                                    if !vec.contains(elem) {
-                                        ids_filter.remove(elem);
-                                    };
-                                };
-                                if ids_filter.is_empty() {
-                                    return Ok(json!({"accounts": []}));
-                                };
-                            }
-                        },
-                        None => return Ok(json!({"accounts": []}))
-                    }
-                }
-            }
-        };
-        if let Some(sex) = &filters.sex_eq {
-            match self.hash_sex.get(sex) {
-                Some(vec) => match ids_filter.is_empty() {
-                    true => ids_filter.extend(vec.iter()),
-                    false => {
-                        for elem in &ids_filter {
-                            if !vec.contains(elem) {
-                                ids_filter.remove(elem);
-                            };
-                        };
-                        if ids_filter.is_empty() {
-                            return Ok(json!({"accounts": []}));
-                        };
-                    }
-                },
-                None => return Ok(json!({"accounts": []}))
-            }
-        };
+
+        // TODO: emails, interests and likes filters
 
         let end_ids: BTreeMap<&u32, &Account> = if ids_filter.is_empty() {
             self.accounts
@@ -437,6 +361,14 @@ impl DataBase {
                 };
             };
 
+            if let Some(_) = filters.premium_now {
+                elem.insert("premium", json!(acc.premium));
+            } else if let Some(val) = filters.premium_null {
+                if val == 0 {
+                    elem.insert("premium", json!(acc.premium));
+                };
+            };
+
             if let Some(_) = filters.sname_eq {
                 elem.insert("sname", json!(acc.sname));
             } else if let Some(val) = filters.sname_null {
@@ -479,91 +411,87 @@ impl DataBase {
 }
 
 fn filter_one(filters: &Filters, account: &Account) -> bool {
-//    match &filters.status_eq {
-//        None => (),
-//        Some(val) => {
-//            if account.status != *val { return false; }
-//        }
-//    };
-//    match &filters.status_neq {
-//        None => (),
-//        Some(val) => {
-//            if account.status == *val { return false; }
-//        }
-//    };
-//    match &filters.sex_eq {
-//        None => (),
-//        Some(val) => {
-//            if account.sex != *val { return false; }
-//        }
-//    };
-    match &filters.birth_year {
-        None => (),
-        Some(val) => {
-            if Utc.timestamp(account.birth, 0).year() != *val { return false; }
+    if let Some(val) = &filters.status_eq {
+        if account.status != *val { return false; }
+    } else if let Some(val) = &filters.status_neq {
+        if account.status == *val { return false; }
+    };
+
+    if let Some(val) = &filters.sex_eq {
+        if account.sex != *val { return false; }
+    };
+
+    if let Some(val) = &filters.birth_year {
+        if Utc.timestamp(account.birth, 0).year() != *val { return false; }
+    } else if let Some(val) = &filters.birth_gt {
+        if account.birth <= *val { return false; }
+    } else if let Some(val) = &filters.birth_lt {
+        if account.birth >= *val { return false; }
+    };
+
+    if let Some(val) = &filters.fname_null {
+        match val {
+            1 => { if let Some(_) = account.fname { return false; } }
+            0 => { if let None = account.fname { return false; } }
+            _ => ()
+        }
+    } else if let Some(val) = &filters.fname_eq {
+        if let Some(name) = &account.fname {
+            if name != val { return false; }
+        } else {
+            return false;
         }
     };
-    match &filters.birth_gt {
-        None => (),
-        Some(val) => {
-            if account.birth <= *val { return false; }
+
+    if let Some(val) = &filters.phone_null {
+        match val {
+            1 => { if let Some(_) = account.phone { return false; } }
+            0 => { if let None = account.phone { return false; } }
+            _ => ()
         }
     };
-    match &filters.birth_lt {
-        None => (),
-        Some(val) => {
-            if account.birth >= *val { return false; }
+
+    if let Some(val) = &filters.sname_null {
+        match val {
+            1 => { if let Some(_) = account.sname { return false; } }
+            0 => { if let None = account.sname { return false; } }
+            _ => ()
+        }
+    } else if let Some(val) = &filters.sname_eq {
+        if let Some(name) = &account.sname {
+            if name != val { return false; }
+        } else {
+            return false;
         }
     };
-    match &filters.fname_null {
-        None => (),
-        Some(val) => {
-            match val {
-                1 => { if let Some(_) = account.fname { return false; } }
-                0 => { if let None = account.fname { return false; } }
-                _ => ()
-            }
+
+    if let Some(val) = &filters.country_null {
+        match val {
+            1 => { if let Some(_) = account.country { return false; } }
+            0 => { if let None = account.country { return false; } }
+            _ => ()
         }
     };
-    match &filters.fname_eq {
-        None => (),
-        Some(val) => {
-            if let Some(name) = &account.fname {
-                if name != val { return false; }
-            } else {
-                return false;
-            }
+
+    if let Some(val) = &filters.city_null {
+        match val {
+            1 => { if let Some(_) = account.city { return false; } }
+            0 => { if let None = account.city { return false; } }
+            _ => ()
         }
     };
-    match &filters.phone_null {
-        None => (),
-        Some(val) => {
-            match val {
-                1 => { if let Some(_) = account.phone { return false; } }
-                0 => { if let None = account.phone { return false; } }
-                _ => ()
-            }
+
+    if let Some(val) = &filters.premium_null {
+        match val {
+            1 => { if let Some(_) = account.premium { return false; } }
+            0 => { if let None = account.premium { return false; } }
+            _ => ()
         }
-    };
-    match &filters.sname_null {
-        None => (),
-        Some(val) => {
-            match val {
-                1 => { if let Some(_) = account.sname { return false; } }
-                0 => { if let None = account.sname { return false; } }
-                _ => ()
-            }
-        }
-    };
-    match &filters.sname_eq {
-        None => (),
-        Some(val) => {
-            if let Some(name) = &account.sname {
-                if name != val { return false; }
-            } else {
-                return false;
-            }
-        }
+    } else if let Some(_) = &filters.premium_now {
+        if let Some(val) = &account.premium {
+            let now = Utc::now().timestamp();
+            if val.start > now || val.finish < now { return false; };
+        } else { return false; };
     };
 //    match &filters.email_domain {
 //        Some(val) => (),
@@ -589,31 +517,7 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
 //        Some(val) => (),
 //        None => ()
 //    };
-//    match &filters.country_eq {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.country_null {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.city_eq {
-//        Some(val) => (),
-//        None => ()
-//    };
 //    match &filters.city_any {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.city_null {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.birth_lt {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.birth_gt {
 //        Some(val) => (),
 //        None => ()
 //    };
@@ -626,14 +530,6 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
 //        None => ()
 //    };
 //    match &filters.likes_contains {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.premium_now {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.premium_null {
 //        Some(val) => (),
 //        None => ()
 //    };
@@ -790,18 +686,18 @@ struct Filters {
     //
     #[validate(range(min = "0", max = "1"))]
     phone_null: Option<u8>,
-    //
+    // +
     country_eq: Option<String>,
     // +
     country_null: Option<u8>,
-    //
+    // +
     city_eq: Option<String>,
     // +
     city_any: Option<String>,
     //
     #[validate(range(min = "0", max = "1"))]
     city_null: Option<u8>,
-    //
+    // +
     birth_lt: Option<i64>,
     // +
     birth_gt: Option<i64>,
@@ -815,10 +711,10 @@ struct Filters {
     likes_contains: Option<String>,
     //
     premium_now: Option<i64>,
-    //
+    // +
     #[validate(range(min = "0", max = "1"))]
     premium_null: Option<u8>,
-    //
+    // +
     query_id: Option<i64>,
 }
 
