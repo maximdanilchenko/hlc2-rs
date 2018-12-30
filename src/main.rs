@@ -17,6 +17,8 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
+use std::iter::FromIterator;
 
 use actix_web::{App, HttpRequest, HttpResponse, Json, Path, Query,
                 server, State};
@@ -31,37 +33,46 @@ struct AppState {
 }
 
 struct DataBase {
-    interests: BTreeMap<String, BTreeSet<u32>>,
+    accounts: BTreeMap<u32, Account>,
+    interests: HashMap<String, BTreeSet<u32>>,
     countries: HashMap<String, BTreeSet<u32>>,
     cities: HashMap<String, BTreeSet<u32>>,
-    accounts: BTreeMap<u32, Account>,
     emails: BTreeMap<String, u32>,
-//    hash_codes: HashMap<u16, BTreeSet<u32>>,
+// TODO:
+//   phone_codes: HashMap<u16, BTreeSet<u32>>,
+//   email_domains: HashMap<u16, BTreeSet<u32>>,
 }
 
 impl DataBase {
     fn new() -> DataBase {
         DataBase {
             accounts: BTreeMap::new(),
-            interests: BTreeMap::new(),
+            interests: HashMap::new(),
             countries: HashMap::new(),
             cities: HashMap::new(),
             emails: BTreeMap::new(),
-//            hash_codes: HashMap::new(),
+// TODO:
+//   phone_codes: HashMap::new(),
+//   email_domains: HashMap::new(),
         }
     }
 
     fn from_file(path: &str) -> DataBase {
+        let now = Instant::now();
+
         let mut database = DataBase::new();
 
         let file = File::open(path).unwrap();
         let reader = BufReader::new(file);
-
         let mut zip = zip::ZipArchive::new(reader).unwrap();
+
         let mut index = 1;
+        let mut accounts_cache: Vec<AccountFull> = Vec::new();
         loop {
             let file_name = format!("accounts_{}.json", index);
+            let mut accounts: HashMap<String, Vec<AccountFull>>;
 
+            println!("Starting file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
             let mut data_file = match zip.by_name(file_name.as_str()) {
                 Ok(f) => f,
                 Err(_) => break,
@@ -70,30 +81,32 @@ impl DataBase {
             let mut data = String::new();
             data_file.read_to_string(&mut data).unwrap();
 
-            let mut accounts: HashMap<String, Vec<AccountFull>> = serde_json::from_str(&data).unwrap();
-
-            for account in accounts.remove("accounts").unwrap() {
-                match database.insert(account, false) {
-                    Err(_) => println!("Error while inserting"),
-                    Ok(_) => ()
-                }
-            }
-
-            println!("Ready file: {:?}", file_name);
+            accounts = serde_json::from_str(data.as_ref()).unwrap();
+            accounts_cache.extend(accounts.remove("accounts").unwrap());
+            println!("Read. Starting deserialization.. Elapsed {} secs from start.", now.elapsed().as_secs());
+            println!("Ready file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
             database.print_len();
             memory_info();
+            println!("--------");
 
             index += 1;
         };
+        for account in accounts_cache {
+            match database.insert(account, false) {
+                Err(_) => println!("Error while inserting"),
+                Ok(_) => ()
+            }
+        };
+        println!("Done! Elapsed {} secs from start.", now.elapsed().as_secs());
         database
     }
 
     fn print_len(&self) {
         println!("Accounts total num: {}", self.accounts.len());
-        println!("Interests total num: {}", self.interests.len());
-        println!("Countries total num: {}", self.countries.len());
-        println!("Cities total num: {}", self.cities.len());
-        println!("Emails total num: {}", self.emails.len());
+//        println!("Interests total num: {}", self.interests.len());
+//        println!("Countries total num: {}", self.countries.len());
+//        println!("Cities total num: {}", self.cities.len());
+//        println!("Emails total num: {}", self.emails.len());
     }
 
 //    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
@@ -107,7 +120,9 @@ impl DataBase {
 //    }
 
     fn insert_to_country(&mut self, uid: &u32, country: String) {
-        self.countries.entry(country).or_insert(BTreeSet::new()).insert(uid.clone());
+        self.countries.entry(country)
+            .or_insert(BTreeSet::new())
+            .insert(uid.clone());
     }
 
     fn delete_from_country(&mut self, uid: &u32, country: String) {
@@ -128,7 +143,9 @@ impl DataBase {
 
     fn insert_to_interests(&mut self, uid: &u32, interests: Vec<String>) {
         for elem in interests {
-            self.interests.entry(elem).or_insert(BTreeSet::new()).insert(uid.clone());
+            self.interests.entry(elem)
+                .or_insert(BTreeSet::new())
+                .insert(uid.clone());
         }
     }
 
@@ -283,6 +300,19 @@ impl DataBase {
     }
 
     fn filter(&self, filters: Filters) -> Result<serde_json::Value, ()> {
+        match &filters.interests_contains {
+            Some(_) => return Ok(json!({"accounts": []})),
+            None => ()
+        };
+        match &filters.interests_any {
+            Some(_) => return Ok(json!({"accounts": []})),
+            None => ()
+        };
+        match &filters.likes_contains {
+            Some(_) => return Ok(json!({"accounts": []})),
+            None => ()
+        };
+
         let mut ids_filter = BTreeSet::new();
 
         for (filter, data) in [
@@ -292,7 +322,7 @@ impl DataBase {
             if let Some(key) = filter {
                 match data.get(key) {
                     Some(vec) => match ids_filter.is_empty() {
-                        true => ids_filter.extend(vec.iter()),
+                        true => ids_filter.extend(vec.into_iter()),
                         false => {
                             let mut new_ids_filter = BTreeSet::new();
                             for elem in ids_filter.intersection(vec) {
@@ -305,8 +335,43 @@ impl DataBase {
                         }
                     },
                     None => return Ok(json!({"accounts": []}))
+                };
+            };
+        };
+        if let Some(cities) = &filters.city_any {
+            let mut ids_cities = BTreeSet::new();
+            for city in cities.split(',') {
+                match self.cities.get(city) {
+                    Some(vec) => {
+                        ids_cities.extend(vec.into_iter());
+                    }
+                    None => ()
+                };
+            };
+            if ids_cities.is_empty() {
+                return Ok(json!({"accounts": []}));
+            };
+            match ids_filter.is_empty() {
+                true => ids_filter.extend(ids_cities.into_iter()),
+                false => {
+                    let mut new_ids_filter = BTreeSet::new();
+                    for elem in ids_filter.intersection(&ids_cities) {
+                        new_ids_filter.insert(elem.clone());
+                    };
+                    if new_ids_filter.is_empty() {
+                        return Ok(json!({"accounts": []}));
+                    };
+                    ids_filter = new_ids_filter;
                 }
             };
+        };
+
+        let fnames_any_filter: Option<HashSet<String>> = match &filters.fname_any {
+            Some(fnames) => Some(HashSet::from_iter(
+                fnames.split(',')
+                    .into_iter()
+                    .map(|s| s.to_string()))),
+            None => None
         };
 
         // TODO: emails, interests and likes filters
@@ -315,7 +380,7 @@ impl DataBase {
             self.accounts
                 .iter()
                 .rev()
-                .filter(|(_, acc)| filter_one(&filters, acc))
+                .filter(|(_, acc)| filter_one(&filters, &fnames_any_filter, acc))
                 .take(filters.limit as usize)
                 .collect()
         } else {
@@ -323,7 +388,7 @@ impl DataBase {
                 .iter()
                 .rev()
                 .map(|k| (k, self.accounts.get(&k).unwrap()))
-                .filter(|(_, acc)| filter_one(&filters, acc))
+                .filter(|(_, acc)| filter_one(&filters, &fnames_any_filter, acc))
                 .take(filters.limit as usize)
                 .collect()
         };
@@ -359,6 +424,8 @@ impl DataBase {
                 if val == 0 {
                     elem.insert("fname", json!(acc.fname));
                 };
+            } else if let Some(_) = filters.fname_any {
+                elem.insert("fname", json!(acc.fname));
             };
 
             if let Some(_) = filters.premium_now {
@@ -375,12 +442,16 @@ impl DataBase {
                 if val == 0 {
                     elem.insert("sname", json!(acc.sname));
                 };
+            } else if let Some(_) = filters.sname_starts {
+                elem.insert("sname", json!(acc.sname));
             };
 
             if let Some(val) = filters.phone_null {
                 if val == 0 {
                     elem.insert("phone", json!(acc.phone));
                 };
+            } else if let Some(_) = filters.phone_code {
+                elem.insert("phone", json!(acc.phone));
             };
 
             if let Some(_) = filters.city_any {
@@ -401,24 +472,22 @@ impl DataBase {
                 };
             };
 
-
             result.push(elem);
         };
-
 
         Ok(json!({"accounts": result}))
     }
 }
 
-fn filter_one(filters: &Filters, account: &Account) -> bool {
+fn filter_one(filters: &Filters, fnames_any_filter: &Option<HashSet<String>>, account: &Account) -> bool {
     if let Some(val) = &filters.status_eq {
-        if account.status != *val { return false; }
+        if &account.status != val { return false; }
     } else if let Some(val) = &filters.status_neq {
-        if account.status == *val { return false; }
+        if &account.status == val { return false; }
     };
 
     if let Some(val) = &filters.sex_eq {
-        if account.sex != *val { return false; }
+        if &account.sex != val { return false; }
     };
 
     if let Some(val) = &filters.birth_year {
@@ -431,8 +500,8 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
 
     if let Some(val) = &filters.fname_null {
         match val {
-            1 => { if let Some(_) = account.fname { return false; } }
-            0 => { if let None = account.fname { return false; } }
+            1 => { if let Some(_) = &account.fname { return false; } }
+            0 => { if let None = &account.fname { return false; } }
             _ => ()
         }
     } else if let Some(val) = &filters.fname_eq {
@@ -441,6 +510,12 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
         } else {
             return false;
         }
+    } else if let Some(fnames) = fnames_any_filter {
+        if let Some(name) = &account.fname {
+            if !fnames.contains(name) { return false; }
+        } else {
+            return false;
+        };
     };
 
     if let Some(val) = &filters.phone_null {
@@ -448,7 +523,13 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
             1 => { if let Some(_) = account.phone { return false; } }
             0 => { if let None = account.phone { return false; } }
             _ => ()
-        }
+        };
+    } else if let Some(val) = &filters.phone_code {
+        if let Some(phone) = &account.phone {
+            if let Some(phone_code) = phone.get(2..5) {
+                if val != phone_code { return false; }
+            };
+        } else { return false; };
     };
 
     if let Some(val) = &filters.sname_null {
@@ -460,6 +541,12 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
     } else if let Some(val) = &filters.sname_eq {
         if let Some(name) = &account.sname {
             if name != val { return false; }
+        } else {
+            return false;
+        }
+    } else if let Some(val) = &filters.sname_starts {
+        if let Some(name) = &account.sname {
+            if !name.starts_with(val) { return false; }
         } else {
             return false;
         }
@@ -481,10 +568,22 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
         }
     };
 
+    if let Some(val) = &filters.email_domain {
+        let vec: Vec<&str> = account.email.split('@').collect();
+        match vec.get(1) {
+            Some(elem) => { if elem != val { return false; } }
+            None => return false
+        }
+    } else if let Some(val) = &filters.email_gt {
+        if &*account.email <= val.as_str() { return false; };
+    } else if let Some(val) = &filters.email_lt {
+        if &*account.email >= val.as_str() { return false; };
+    };
+
     if let Some(val) = &filters.premium_null {
         match val {
-            1 => { if let Some(_) = account.premium { return false; } }
-            0 => { if let None = account.premium { return false; } }
+            1 => { if let Some(_) = &account.premium { return false; } }
+            0 => { if let None = &account.premium { return false; } }
             _ => ()
         }
     } else if let Some(_) = &filters.premium_now {
@@ -493,34 +592,7 @@ fn filter_one(filters: &Filters, account: &Account) -> bool {
             if val.start > now || val.finish < now { return false; };
         } else { return false; };
     };
-//    match &filters.email_domain {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.email_lt {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.email_gt {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.fname_any {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.sname_starts {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.phone_code {
-//        Some(val) => (),
-//        None => ()
-//    };
-//    match &filters.city_any {
-//        Some(val) => (),
-//        None => ()
-//    };
+
 //    match &filters.interests_contains {
 //        Some(val) => (),
 //        None => ()
@@ -655,66 +727,38 @@ struct LikesRequest {
 #[derive(Debug, Validate, Serialize, Deserialize)]
 struct Filters {
     limit: u32,
-    // +
     sex_eq: Option<Sex>,
-    // +
     email_domain: Option<String>,
-    //
     email_lt: Option<String>,
-    //
     email_gt: Option<String>,
-    //
     status_eq: Option<Status>,
-    // +
     status_neq: Option<Status>,
-    // +
     fname_eq: Option<String>,
-    // +
     fname_any: Option<String>,
-    //
     #[validate(range(min = "0", max = "1"))]
     fname_null: Option<u8>,
-    // +
     sname_eq: Option<String>,
-    // +
     sname_starts: Option<String>,
-    //
     #[validate(range(min = "0", max = "1"))]
     sname_null: Option<u8>,
-    // +
-    phone_code: Option<u16>,
-    //
+    phone_code: Option<String>,
     #[validate(range(min = "0", max = "1"))]
     phone_null: Option<u8>,
-    // +
     country_eq: Option<String>,
-    // +
     country_null: Option<u8>,
-    // +
     city_eq: Option<String>,
-    // +
     city_any: Option<String>,
-    //
     #[validate(range(min = "0", max = "1"))]
     city_null: Option<u8>,
-    // +
     birth_lt: Option<i64>,
-    // +
     birth_gt: Option<i64>,
-    // +
     birth_year: Option<i32>,
-    // +
     interests_contains: Option<String>,
-    //
     interests_any: Option<String>,
-    //
     likes_contains: Option<String>,
-    //
     premium_now: Option<i64>,
-    // +
     #[validate(range(min = "0", max = "1"))]
     premium_null: Option<u8>,
-    // +
     query_id: Option<i64>,
 }
 
@@ -734,7 +778,7 @@ fn filter(query: Query<Filters>, state: State<AppState>) -> HttpResponse {
                 Ok(val) => HttpResponse::Ok().json(val)
             }
         }
-        Err(_) => HttpResponse::build(StatusCode::BAD_REQUEST).finish()
+        Err(_) => HttpResponse::BadRequest().finish()
     }
 }
 
@@ -804,8 +848,9 @@ fn main() {
                 r.method(Method::POST).with(likes))
             .resource("/{id}/", |r|
                 r.method(Method::POST).with(update))
-    }).keep_alive(120)
-        .workers(8)
+    }).backlog(8192)
+        .keep_alive(120)
+//        .workers(8)
         .bind(addr)
         .unwrap()
         .shutdown_timeout(1)
