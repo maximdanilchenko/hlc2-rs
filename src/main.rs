@@ -15,10 +15,10 @@ use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock, Mutex};
 use std::time::Instant;
 use std::iter::FromIterator;
+use std::thread;
 
 use actix_web::{App, HttpRequest, HttpResponse, Json, Path, Query,
                 server, State};
@@ -34,7 +34,8 @@ struct AppState {
 
 struct DataBase {
     accounts: BTreeMap<u32, Account>,
-    interests: HashMap<String, BTreeSet<u32>>,
+//    interests: HashMap<String, BTreeSet<u32>>,
+    interests: Vec<String>,
     countries: HashMap<String, BTreeSet<u32>>,
     cities: HashMap<String, BTreeSet<u32>>,
     emails: BTreeMap<String, u32>,
@@ -47,7 +48,7 @@ impl DataBase {
     fn new() -> DataBase {
         DataBase {
             accounts: BTreeMap::new(),
-            interests: HashMap::new(),
+            interests: Vec::new(),
             countries: HashMap::new(),
             cities: HashMap::new(),
             emails: BTreeMap::new(),
@@ -57,56 +58,76 @@ impl DataBase {
         }
     }
 
-    fn from_file(path: &str) -> DataBase {
+    fn from_file(path: &'static str) -> DataBase {
         let now = Instant::now();
 
         let mut database = DataBase::new();
+//        let mut accs: Vec<AccountFull> = Vec::new();
+        let accounts_arc: Arc<Mutex<Vec<AccountFull>>> = Arc::new(Mutex::new(vec![]));
+        {
 
-        let file = File::open(path).unwrap();
-        let reader = BufReader::new(file);
-        let mut zip = zip::ZipArchive::new(reader).unwrap();
+            let mut index = 1;
+            let mut handles = vec![];
 
-        let mut index = 1;
-        let mut accounts_cache: Vec<AccountFull> = Vec::new();
-        loop {
-            let file_name = format!("accounts_{}.json", index);
-            let mut accounts: HashMap<String, Vec<AccountFull>>;
+            let file = File::open(path).unwrap();
+            let reader = BufReader::new(file);
+            let mut zip = zip::ZipArchive::new(reader).unwrap();
 
-            println!("Starting file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
-            let mut data_file = match zip.by_name(file_name.as_str()) {
-                Ok(f) => f,
-                Err(_) => break,
-            };
+            loop {
+                let accounts_clone = Arc::clone(&accounts_arc);
 
-            let mut data = String::new();
-            data_file.read_to_string(&mut data).unwrap();
+                let file_name = format!("accounts_{}.json", index);
+                match zip.by_name(file_name.as_str()) {
+                    Ok(_) => (),
+                    Err(_) => break,
+                };
 
-            accounts = serde_json::from_str(data.as_ref()).unwrap();
-            accounts_cache.extend(accounts.remove("accounts").unwrap());
-            println!("Read. Starting deserialization.. Elapsed {} secs from start.", now.elapsed().as_secs());
-            println!("Ready file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
-            database.print_len();
-            memory_info();
-            println!("--------");
+                let handle = thread::spawn(move || {
 
-            index += 1;
-        };
-        for account in accounts_cache {
+                    let file = File::open(path).unwrap();
+                    let reader = BufReader::new(file);
+                    let mut zip = zip::ZipArchive::new(reader).unwrap();
+
+                    let file_name = format!("accounts_{}.json", index);
+                    let mut accounts: HashMap<String, Vec<AccountFull>>;
+
+                    println!("Starting file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
+                    let mut data_file = zip.by_name(file_name.as_str()).unwrap();
+
+                    let mut data = String::new();
+                    data_file.read_to_string(&mut data).unwrap();
+
+                    accounts = serde_json::from_str(data.as_ref()).unwrap();
+                    let mut accounts_cache = accounts_clone.lock().unwrap();
+                    accounts_cache.extend(accounts.remove("accounts").unwrap());
+                    println!("Ready file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
+                });
+                handles.push(handle);
+                index += 1;
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        }
+
+        for account in accounts_arc.lock().unwrap().drain(0..) {
             match database.insert(account, false) {
                 Err(_) => println!("Error while inserting"),
                 Ok(_) => ()
             }
         };
         println!("Done! Elapsed {} secs from start.", now.elapsed().as_secs());
+        database.print_len();
         database
     }
 
     fn print_len(&self) {
         println!("Accounts total num: {}", self.accounts.len());
-//        println!("Interests total num: {}", self.interests.len());
-//        println!("Countries total num: {}", self.countries.len());
-//        println!("Cities total num: {}", self.cities.len());
-//        println!("Emails total num: {}", self.emails.len());
+        println!("Interests total num: {}", self.interests.len());
+        println!("Countries total num: {}", self.countries.len());
+        println!("Cities total num: {}", self.cities.len());
+        println!("Emails total num: {}", self.emails.len());
     }
 
 //    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
@@ -141,12 +162,13 @@ impl DataBase {
         );
     }
 
-    fn insert_to_interests(&mut self, uid: &u32, interests: Vec<String>) {
-        for elem in interests {
-            self.interests.entry(elem)
-                .or_insert(BTreeSet::new())
-                .insert(uid.clone());
-        }
+    fn insert_to_interests(&mut self, _uid: &u32, interests: Vec<String>) {
+            self.interests.extend(interests.into_iter())
+//        for elem in interests {
+//            self.interests.entry(elem)
+//                .or_insert(BTreeSet::new())
+//                .insert(uid.clone());
+//        }
     }
 
     fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
