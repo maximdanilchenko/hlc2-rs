@@ -10,6 +10,7 @@ extern crate validator_derive;
 extern crate validator;
 extern crate sys_info;
 extern crate chrono;
+extern crate fnv;
 
 use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::env;
@@ -26,6 +27,7 @@ use actix_web::http::{Method, StatusCode};
 use validator::Validate;
 
 use chrono::{Utc, Datelike, TimeZone};
+use fnv::FnvHashMap;
 
 
 struct AppState {
@@ -34,10 +36,10 @@ struct AppState {
 
 struct DataBase {
     accounts: BTreeMap<u32, Account>,
-//    interests: HashMap<String, BTreeSet<u32>>,
-    interests: Vec<String>,
-    countries: HashMap<String, BTreeSet<u32>>,
-    cities: HashMap<String, BTreeSet<u32>>,
+    //    interests: FnvHashMap<String, Vec<u32>>,
+//    interests: Vec<String>,
+    countries: FnvHashMap<String, HashSet<String>>,
+    cities: FnvHashMap<String, BTreeSet<u32>>,
     emails: BTreeMap<String, u32>,
 // TODO:
 //   phone_codes: HashMap<u16, BTreeSet<u32>>,
@@ -48,9 +50,9 @@ impl DataBase {
     fn new() -> DataBase {
         DataBase {
             accounts: BTreeMap::new(),
-            interests: Vec::new(),
-            countries: HashMap::new(),
-            cities: HashMap::new(),
+//            interests: FnvHashMap::default(),
+            countries: FnvHashMap::default(),
+            cities: FnvHashMap::default(),
             emails: BTreeMap::new(),
 // TODO:
 //   phone_codes: HashMap::new(),
@@ -62,48 +64,43 @@ impl DataBase {
         let now = Instant::now();
 
         let mut database = DataBase::new();
-//        let mut accs: Vec<AccountFull> = Vec::new();
-        let accounts_arc: Arc<Mutex<Vec<AccountFull>>> = Arc::new(Mutex::new(vec![]));
+        let accounts_arc: Arc<Mutex<Vec<AccountFull>>> = Arc::new(
+            Mutex::new(
+                Vec::with_capacity(
+                    1300000)));
         {
-
-            let mut index = 1;
             let mut handles = vec![];
 
-            let file = File::open(path).unwrap();
-            let reader = BufReader::new(file);
-            let mut zip = zip::ZipArchive::new(reader).unwrap();
-
-            loop {
+            for thread_num in 1..3 {
                 let accounts_clone = Arc::clone(&accounts_arc);
 
-                let file_name = format!("accounts_{}.json", index);
-                match zip.by_name(file_name.as_str()) {
-                    Ok(_) => (),
-                    Err(_) => break,
-                };
-
                 let handle = thread::spawn(move || {
+                    for file_num in 0..100 {
+                        let index = thread_num + (file_num * 2);
+                        let file = File::open(path).unwrap();
+                        let reader = BufReader::new(file);
+                        let mut zip = zip::ZipArchive::new(reader).unwrap();
 
-                    let file = File::open(path).unwrap();
-                    let reader = BufReader::new(file);
-                    let mut zip = zip::ZipArchive::new(reader).unwrap();
 
-                    let file_name = format!("accounts_{}.json", index);
-                    let mut accounts: HashMap<String, Vec<AccountFull>>;
+                        let file_name = format!("accounts_{}.json", index);
+                        let mut accounts: HashMap<String, Vec<AccountFull>>;
 
-                    println!("Starting file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
-                    let mut data_file = zip.by_name(file_name.as_str()).unwrap();
+                        let mut data_file = match zip.by_name(file_name.as_str()) {
+                            Err(_) => break,
+                            Ok(f) => f
+                        };
+                        println!("Starting file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
 
-                    let mut data = String::new();
-                    data_file.read_to_string(&mut data).unwrap();
+                        let mut data = String::new();
+                        data_file.read_to_string(&mut data).unwrap();
 
-                    accounts = serde_json::from_str(data.as_ref()).unwrap();
-                    let mut accounts_cache = accounts_clone.lock().unwrap();
-                    accounts_cache.extend(accounts.remove("accounts").unwrap());
-                    println!("Ready file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
+                        accounts = serde_json::from_str(data.as_ref()).unwrap();
+                        let mut accounts_cache = accounts_clone.lock().unwrap();
+                        accounts_cache.extend(accounts.remove("accounts").unwrap());
+                        println!("Ready file: {:?}. Elapsed {} secs from start.", file_name, now.elapsed().as_secs());
+                    }
                 });
                 handles.push(handle);
-                index += 1;
             }
 
             for handle in handles {
@@ -111,12 +108,18 @@ impl DataBase {
             }
         }
 
-        for account in accounts_arc.lock().unwrap().drain(0..) {
+        println!("Starting inserting! Elapsed {} secs from start.", now.elapsed().as_secs());
+
+        for index in 0..200 {
+         for account in accounts_arc.lock().unwrap().drain(index*10000..index*10000+10000) {
             match database.insert(account, false) {
                 Err(_) => println!("Error while inserting"),
                 Ok(_) => ()
             }
-        };
+        }
+
+        }
+
         println!("Done! Elapsed {} secs from start.", now.elapsed().as_secs());
         database.print_len();
         database
@@ -124,7 +127,7 @@ impl DataBase {
 
     fn print_len(&self) {
         println!("Accounts total num: {}", self.accounts.len());
-        println!("Interests total num: {}", self.interests.len());
+//        println!("Interests total num: {}", self.interests.len());
         println!("Countries total num: {}", self.countries.len());
         println!("Cities total num: {}", self.cities.len());
         println!("Emails total num: {}", self.emails.len());
@@ -140,16 +143,10 @@ impl DataBase {
 ////        );
 //    }
 
-    fn insert_to_country(&mut self, uid: &u32, country: String) {
+    fn insert_to_country(&mut self, city: &String, country: String) {
         self.countries.entry(country)
-            .or_insert(BTreeSet::new())
-            .insert(uid.clone());
-    }
-
-    fn delete_from_country(&mut self, uid: &u32, country: String) {
-        self.countries.entry(country).and_modify(|set|
-            { set.remove(uid); }
-        );
+            .or_insert(HashSet::new())
+            .insert(city.clone());
     }
 
     fn insert_to_city(&mut self, uid: &u32, city: String) {
@@ -162,14 +159,14 @@ impl DataBase {
         );
     }
 
-    fn insert_to_interests(&mut self, _uid: &u32, interests: Vec<String>) {
-            self.interests.extend(interests.into_iter())
+//    fn insert_to_interests(&mut self, uid: &u32, interests: Vec<String>) {
+////            self.interests.extend(interests.into_iter());
 //        for elem in interests {
 //            self.interests.entry(elem)
-//                .or_insert(BTreeSet::new())
-//                .insert(uid.clone());
+//                .or_insert(Vec::new())
+//                .push(uid.clone());
 //        }
-    }
+//    }
 
     fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
         let mut new_account = match self.accounts.get_mut(&uid) {
@@ -226,19 +223,35 @@ impl DataBase {
             new_account.likes.extend(likes);
         };
 
+        if let Some(country) = &account.country {
+            new_account.country = Some(country.clone());
+        };
+
+        if let Some(city) = &account.city {
+            new_account.city = Some(city.clone());
+        };
+
+
+        match account.country {
+            Some(country) => {
+                match &account.city {
+                    Some(val) => {
+                        self.insert_to_country(val, country.clone());
+                    }
+                    None => ()
+                }
+            }
+            None => ()
+        };
+
         if let Some(city) = account.city {
             self.delete_from_city(&uid, city.clone());
-            self.insert_to_city(&uid, city);
+            self.insert_to_city(&uid, city.clone());
         };
 
-        if let Some(country) = account.country {
-            self.delete_from_country(&uid, country.clone());
-            self.insert_to_country(&uid, country);
-        };
-
-        if let Some(interests) = account.interests {
-            self.insert_to_interests(&uid, interests);
-        };
+//        if let Some(interests) = account.interests {
+//            self.insert_to_interests(&uid, interests);
+//        };
 
         Ok(uid)
     }
@@ -256,9 +269,23 @@ impl DataBase {
             };
         }
 
-        let likes = match account.likes {
-            None => Vec::new(),
-            Some(val) => val
+        let likes = Vec::new();
+//        match account.likes {
+//            None => Vec::new(),
+//            Some(val) => val
+//        };
+
+        let country = match account.country {
+            Some(country) => {
+                match &account.city {
+                    Some(val) => {
+                        self.insert_to_country(val, country.clone());
+                        Some(country)
+                    }
+                    None => None
+                }
+            }
+            None => None
         };
 
         let city = match account.city {
@@ -269,17 +296,9 @@ impl DataBase {
             None => None
         };
 
-        let country = match account.country {
-            Some(country) => {
-                self.insert_to_country(&uid, country.clone());
-                Some(country)
-            }
-            None => None
-        };
-
-        if let Some(val) = account.interests {
-            self.insert_to_interests(&uid, val);
-        };
+//        if let Some(val) = account.interests {
+//            self.insert_to_interests(&uid, val);
+//        };
 
         self.emails.insert(account.email.clone(), uid);
 
@@ -337,29 +356,42 @@ impl DataBase {
 
         let mut ids_filter = BTreeSet::new();
 
-        for (filter, data) in [
-            (&filters.city_eq, &self.cities),
-            (&filters.country_eq, &self.countries),
-        ].iter() {
-            if let Some(key) = filter {
-                match data.get(key) {
-                    Some(vec) => match ids_filter.is_empty() {
-                        true => ids_filter.extend(vec.into_iter()),
-                        false => {
-                            let mut new_ids_filter = BTreeSet::new();
-                            for elem in ids_filter.intersection(vec) {
-                                new_ids_filter.insert(elem.clone());
-                            };
-                            if new_ids_filter.is_empty() {
-                                return Ok(json!({"accounts": []}));
-                            };
-                            ids_filter = new_ids_filter;
+        if let Some(val) = &filters.country_eq {
+            match self.countries.get(val) {
+                Some(val) => {
+                    for city in val {
+                        match self.cities.get(city) {
+                            Some(vec) => ids_filter.extend(vec.into_iter()),
+                            None => ()
                         }
-                    },
-                    None => return Ok(json!({"accounts": []}))
-                };
-            };
-        };
+                    }
+                },
+                None => return Ok(json!({"accounts": []}))
+            }
+            if ids_filter.is_empty() {
+                return Ok(json!({"accounts": []}));
+            }
+        }
+
+        if let Some(key) = &filters.city_eq {
+            match self.cities.get(key) {
+                Some(vec) => match ids_filter.is_empty() {
+                    true => ids_filter.extend(vec.into_iter()),
+                    false => {
+                        let mut new_ids_filter = BTreeSet::new();
+                        for elem in ids_filter.intersection(vec) {
+                            new_ids_filter.insert(elem.clone());
+                        };
+                        if new_ids_filter.is_empty() {
+                            return Ok(json!({"accounts": []}));
+                        };
+                        ids_filter = new_ids_filter;
+                    }
+                },
+                None => return Ok(json!({"accounts": []}))
+            }
+        }
+
         if let Some(cities) = &filters.city_any {
             let mut ids_cities = BTreeSet::new();
             for city in cities.split(',') {
