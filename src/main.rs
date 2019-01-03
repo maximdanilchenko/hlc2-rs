@@ -11,6 +11,7 @@ extern crate chrono;
 extern crate fnv;
 extern crate sys_info;
 extern crate validator;
+extern crate indexmap;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
@@ -27,6 +28,7 @@ use validator::Validate;
 
 use chrono::{Datelike, TimeZone, Utc};
 use fnv::FnvHashMap;
+use indexmap::IndexSet;
 
 struct AppState {
     database: Arc<RwLock<DataBase>>,
@@ -34,19 +36,19 @@ struct AppState {
 
 struct DataBase {
     accounts: BTreeMap<u32, Account>,
-    interests: FnvHashMap<String, BTreeSet<u32>>,
-    countries: FnvHashMap<String, BTreeSet<u32>>,
-    cities: FnvHashMap<String, BTreeSet<u32>>,
+    interests: IndexSet<String>,
+    countries: IndexSet<String>,
+    cities: IndexSet<String>,
     emails: BTreeMap<String, u32>,
-    phone_codes: FnvHashMap<String, BTreeSet<u32>>,
-    email_domains: FnvHashMap<String, BTreeSet<u32>>,
+    phone_codes: IndexSet<String>,
+    email_domains: IndexSet<String>,
 }
 
 impl DataBase {
     fn new() -> DataBase {
         DataBase {
             accounts: BTreeMap::new(),
-            interests: FnvHashMap::default(),
+            interests: IndexSet::new(),
             countries: FnvHashMap::default(),
             cities: FnvHashMap::default(),
             emails: BTreeMap::new(),
@@ -182,21 +184,20 @@ impl DataBase {
     }
 
     fn insert_to_codes(&mut self, uid: &u32, phone: String) {
-            if let Some(phone_code) = phone.get(2..5) {
-                self.phone_codes
-                    .entry(phone_code.to_string())
-                    .or_insert(BTreeSet::new())
-                    .insert(uid.clone());
-            }
-
+        if let Some(phone_code) = phone.get(2..5) {
+            self.phone_codes
+                .entry(phone_code.to_string())
+                .or_insert(BTreeSet::new())
+                .insert(uid.clone());
+        }
     }
 
     fn delete_from_codes(&mut self, uid: &u32, phone: String) {
-            if let Some(phone_code) = phone.get(2..5) {
-                self.phone_codes
-                    .entry(phone_code.to_string())
-                    .and_modify(|set| { set.remove(uid); });
-            }
+        if let Some(phone_code) = phone.get(2..5) {
+            self.phone_codes
+                .entry(phone_code.to_string())
+                .and_modify(|set| { set.remove(uid); });
+        }
     }
 
     fn insert_to_country(&mut self, uid: &u32, country: String) {
@@ -225,14 +226,15 @@ impl DataBase {
         });
     }
 
-    fn insert_to_interests(&mut self, uid: &u32, interests: Vec<String>) {
+    fn insert_to_interests(&mut self, interest: String) -> u32 {
+        self.interests.insert_full(interest).0 as u32
         //            self.interests.extend(interests.into_iter());
-        for elem in interests {
-            self.interests
-                .entry(elem)
-                .or_insert(BTreeSet::new())
-                .insert(uid.clone());
-        }
+//        for elem in interests {
+//            self.interests
+//                .entry(elem)
+//                .or_insert(BTreeSet::new())
+//                .insert(uid.clone());
+//        }
     }
 
     fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
@@ -298,6 +300,16 @@ impl DataBase {
             new_account.city = Some(city.clone());
         };
 
+        if let Some(interests) = account.interests {
+            for elem in interests {
+                let index = self.interests.insert_full(elem).0 as u32;
+                new_account.interests.insert(index);
+            }
+//            new_account.interests.extend(interests
+//                .into_iter()
+//                .map(|interest| self.interests.insert_full(interest).0 as u32));
+        };
+
         if let Some(city) = account.city {
             self.delete_from_city(&uid, city.clone());
             self.insert_to_city(&uid, city);
@@ -316,10 +328,6 @@ impl DataBase {
         if let Some(phone) = account.phone {
             self.delete_from_codes(&uid, phone.clone());
             self.insert_to_codes(&uid, phone);
-        };
-
-        if let Some(interests) = account.interests {
-            self.insert_to_interests(&uid, interests);
         };
 
         Ok(uid)
@@ -369,8 +377,13 @@ impl DataBase {
             None => None,
         };
 
-        if let Some(val) = account.interests {
-            self.insert_to_interests(&uid, val);
+        let interests: BTreeSet<u32> = match account.interests {
+            Some(vec) => {
+                vec
+                    .into_iter()
+                    .map(|interest| self.insert_to_interests(interest)).collect()
+            }
+            None => BTreeSet::new()
         };
 
         self.emails.insert(account.email.clone(), uid);
@@ -391,6 +404,7 @@ impl DataBase {
                 country,
                 city,
                 likes,
+                interests,
             },
         );
         Ok(uid)
@@ -428,100 +442,145 @@ impl DataBase {
             Some(_) => return Ok(json!({"accounts": []})),
             None => (),
         };
+        match &filters.interests_contains {
+            Some(_) => return Ok(json!({"accounts": []})),
+            None => (),
+        };
+        match &filters.interests_any {
+            Some(_) => return Ok(json!({"accounts": []})),
+            None => (),
+        };
 
         // ФИЛЬТРЫ ЧЕРЕЗ ИНДЕКСЫ
 
-        let mut ids_filter = BTreeSet::new();
+//        let ids_filter = BTreeSet::new();
 
-        for (filter, data) in [
-            (&filters.city_eq, &self.cities),
-//            (&filters.phone_code, &self.phone_codes),
-            (&filters.country_eq, &self.countries),
-//            (&filters.email_domain, &self.email_domains),
-        ]
-        .iter()
-        {
-            if let Some(key) = filter {
-                match data.get(key) {
-                    Some(vec) => match ids_filter.is_empty() {
-                        true => ids_filter.extend(vec.into_iter()),
-                        false => {
-                            let mut new_ids_filter = BTreeSet::new();
-                            for elem in ids_filter.intersection(vec) {
-                                new_ids_filter.insert(elem.clone());
-                            }
-                            if new_ids_filter.is_empty() {
-                                return Ok(json!({"accounts": []}));
-                            };
-                            ids_filter = new_ids_filter;
-                        }
-                    },
-                    None => return Ok(json!({"accounts": []})),
-                };
-            };
-        }
+//        for (filter, data) in [
+//            (&filters.city_eq, &self.cities),
+////            (&filters.phone_code, &self.phone_codes),
+//            (&filters.country_eq, &self.countries),
+////            (&filters.email_domain, &self.email_domains),
+//        ]
+//        .iter()
+//        {
+//            if let Some(key) = filter {
+//                match data.get(key) {
+//                    Some(vec) => match ids_filter.is_empty() {
+//                        true => ids_filter.extend(vec.into_iter()),
+//                        false => {
+//                            let mut new_ids_filter = BTreeSet::new();
+//                            for elem in ids_filter.intersection(vec) {
+//                                new_ids_filter.insert(elem.clone());
+//                            }
+//                            if new_ids_filter.is_empty() {
+//                                return Ok(json!({"accounts": []}));
+//                            };
+//                            ids_filter = new_ids_filter;
+//                        }
+//                    },
+//                    None => return Ok(json!({"accounts": []})),
+//                };
+//            };
+//        }
+//
+//        for (filter, data) in [
+//            (&filters.city_any, &self.cities),
+////            (&filters.interests_any, &self.interests),
+//        ]
+//        .iter()
+//        {
+//            if let Some(vals) = filter {
+//                let mut ids_list = BTreeSet::new();
+//                for val in vals.split(',') {
+//                    match data.get(val) {
+//                        Some(vec) => {
+//                            ids_list.extend(vec.into_iter());
+//                        },
+//                        None => (),
+//                    };
+//                }
+//                if ids_list.is_empty() {
+//                    return Ok(json!({"accounts": []}));
+//                };
+//                match ids_filter.is_empty() {
+//                    true => ids_filter.extend(ids_list.into_iter()),
+//                    false => {
+//                        let mut new_ids_filter = BTreeSet::new();
+//                        for elem in ids_filter.intersection(&ids_list) {
+//                            new_ids_filter.insert(elem.clone());
+//                        }
+//                        if new_ids_filter.is_empty() {
+//                            return Ok(json!({"accounts": []}));
+//                        };
+//                        ids_filter = new_ids_filter;
+//                    }
+//                };
+//            };
+//        }
 
-        for (filter, data) in [
-            (&filters.city_any, &self.cities),
-            (&filters.interests_any, &self.interests),
-        ]
-        .iter()
-        {
-            if let Some(vals) = filter {
-                let mut ids_list = BTreeSet::new();
-                for val in vals.split(',') {
-                    match data.get(val) {
-                        Some(vec) => {
-                            ids_list.extend(vec.into_iter());
-                        },
-                        None => (),
-                    };
-                }
-                if ids_list.is_empty() {
-                    return Ok(json!({"accounts": []}));
-                };
-                match ids_filter.is_empty() {
-                    true => ids_filter.extend(ids_list.into_iter()),
-                    false => {
-                        let mut new_ids_filter = BTreeSet::new();
-                        for elem in ids_filter.intersection(&ids_list) {
-                            new_ids_filter.insert(elem.clone());
-                        }
-                        if new_ids_filter.is_empty() {
-                            return Ok(json!({"accounts": []}));
-                        };
-                        ids_filter = new_ids_filter;
-                    }
-                };
-            };
-        }
-
-        if let Some(vals) = &filters.interests_contains {
-            for val in vals.split(',') {
-                match self.interests.get(val) {
-                    Some(vec) => match ids_filter.is_empty() {
-                        true => ids_filter.extend(vec.into_iter()),
-                        false => {
-                            let mut new_ids_filter = BTreeSet::new();
-                            for elem in ids_filter.intersection(vec) {
-                                new_ids_filter.insert(elem.clone());
-                            }
-                            if new_ids_filter.is_empty() {
-                                return Ok(json!({"accounts": []}));
-                            };
-                            ids_filter = new_ids_filter;
-                        }
-                    },
-                    None => return Ok(json!({"accounts": []}))
-                }
-            }
-        }
+//        if let Some(vals) = &filters.interests_contains {
+//            for val in vals.split(',') {
+//                match self.interests.get(val) {
+//                    Some(vec) => match ids_filter.is_empty() {
+//                        true => ids_filter.extend(vec.into_iter()),
+//                        false => {
+//                            let mut new_ids_filter = BTreeSet::new();
+//                            for elem in ids_filter.intersection(vec) {
+//                                new_ids_filter.insert(elem.clone());
+//                            }
+//                            if new_ids_filter.is_empty() {
+//                                return Ok(json!({"accounts": []}));
+//                            };
+//                            ids_filter = new_ids_filter;
+//                        }
+//                    },
+//                    None => return Ok(json!({"accounts": []}))
+//                }
+//            }
+//        }
 
         // ФИЛЬТРЫ ЧЕРЕЗ ПЕРЕБОР
 
         let fnames_any_filter: Option<HashSet<String>> = match &filters.fname_any {
             Some(fnames) => Some(HashSet::from_iter(
                 fnames.split(',').into_iter().map(|s| s.to_string()),
+            )),
+            None => None,
+        };
+
+        let city_any_filter: Option<HashSet<String>> = match &filters.city_any {
+            Some(cities) => Some(HashSet::from_iter(
+                cities.split(',').into_iter().map(|s| s.to_string()),
+            )),
+            None => None,
+        };
+
+        let interests_any_filter: Option<BTreeSet<u32>> = match &filters.interests_any {
+            Some(interests) => Some(BTreeSet::from_iter(
+                interests.split(',')
+                    .into_iter()
+                    .map(|s| {
+                        if let Some((i, _)) = self.interests.get_full(s) {
+                            i as u32
+                        } else {
+                            0
+                        }
+                    }),
+            )),
+            None => None,
+        };
+
+        let interests_contains_filter: Option<BTreeSet<u32>> = match &filters.interests_contains {
+            Some(interests) => Some(BTreeSet::from_iter(
+                interests.split(',')
+                    .into_iter()
+                    .map(|s| {
+                        if let Some((i, _)) = self.interests.get_full(s) {
+                            i as u32
+                        } else {
+                            0
+                        }
+                    }),
             )),
             None => None,
         };
@@ -656,6 +715,11 @@ impl DataBase {
                 )),
                 _ => (),
             }
+        } else if let Some(val) = &filters.country_eq {
+            filters_fns.push(Box::new(move |acc: &Account|
+                if let Some(country) = &acc.country
+                    { country == val } else { false }
+            ));
         };
 
         if let Some(val) = &filters.city_null {
@@ -668,6 +732,30 @@ impl DataBase {
                 )),
                 _ => (),
             }
+        } else if let Some(val) = &filters.city_eq {
+            filters_fns.push(Box::new(move |acc: &Account| {
+                if let Some(city) = &acc.city
+                    { city == val } else { false }
+            }
+            ));
+        } else if let Some(cities) = city_any_filter {
+            filters_fns.push(Box::new(move |acc: &Account| {
+                if let Some(city) = &acc.city {
+                    cities.contains(city)
+                } else {
+                    false
+                }
+            }));
+        };
+
+        if let Some(any_interests) = interests_any_filter {
+            filters_fns.push(Box::new(move |acc: &Account| {
+                !any_interests.is_disjoint(&acc.interests)
+            }));
+        } else if let Some(contains_interests) = interests_contains_filter {
+            filters_fns.push(Box::new(move |acc: &Account| {
+                contains_interests.is_subset(&acc.interests)
+            }));
         };
 
         if let Some(val) = &filters.email_domain {
@@ -699,9 +787,9 @@ impl DataBase {
                 _ => (),
             }
         } else if let Some(_) = &filters.premium_now {
+            let now = Utc::now().timestamp();
             filters_fns.push(Box::new(move |acc: &Account| {
                 if let Some(val) = &acc.premium {
-                    let now = Utc::now().timestamp();
                     val.start <= now && val.finish >= now
                 } else {
                     false
@@ -718,22 +806,29 @@ impl DataBase {
 
         // ФИЛЬТРАЦИЯ
 
-        let end_ids: BTreeMap<&u32, &Account> = if ids_filter.is_empty() {
-            self.accounts
-                .iter()
-                .rev()
-                .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
-                .take(filters.limit as usize)
-                .collect()
-        } else {
-            ids_filter
-                .iter()
-                .rev()
-                .map(|k| (k, self.accounts.get(&k).unwrap()))
-                .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
-                .take(filters.limit as usize)
-                .collect()
-        };
+        let end_ids: BTreeMap<&u32, &Account> = self.accounts
+            .iter()
+            .rev()
+            .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
+            .take(filters.limit as usize)
+            .collect();
+
+//        let end_ids: BTreeMap<&u32, &Account> = if ids_filter.is_empty() {
+//            self.accounts
+//                .iter()
+//                .rev()
+//                .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
+//                .take(filters.limit as usize)
+//                .collect()
+//        } else {
+//            ids_filter
+//                .iter()
+//                .rev()
+//                .map(|k| (k, self.accounts.get(&k).unwrap()))
+//                .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
+//                .take(filters.limit as usize)
+//                .collect()
+//        };
 
         // ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ
 
@@ -849,12 +944,16 @@ struct Account {
     phone: Option<String>,
     sex: Sex,
     birth: i64,
-    country: Option<String>,
-    city: Option<String>,
+    country: Option<u32>,
+    city: Option<u32>,
     joined: i64,
     status: Status,
     premium: Option<Premium>,
     likes: Vec<Likes>,
+    interests: BTreeSet<u32>,
+    email_domain: u32,
+    phone_code: u32,
+
 }
 
 #[serde(deny_unknown_fields)]
@@ -1000,7 +1099,7 @@ fn likes(item: Json<LikesRequest>, state: State<AppState>) -> HttpResponse {
     }
 }
 
-fn update(item: Json<AccountOptional>, path: Path<(u32,)>, state: State<AppState>) -> HttpResponse {
+fn update(item: Json<AccountOptional>, path: Path<(u32, )>, state: State<AppState>) -> HttpResponse {
     match item.0.validate() {
         Ok(_) => {
             let mut database = state.database.write().unwrap();
@@ -1046,22 +1145,22 @@ fn main() {
         App::with_state(AppState {
             database: database.clone(),
         })
-        .prefix("/accounts")
-        .resource("/filter/", |r| r.method(Method::GET).with(filter))
-        .resource("/group/", |r| r.method(Method::GET).f(index))
-        .resource("/{id}/recommend/", |r| r.method(Method::GET).f(index))
-        .resource("/{id}/suggest/", |r| r.method(Method::GET).f(index))
-        .resource("/new/", |r| r.method(Method::POST).with(new))
-        .resource("/likes/", |r| r.method(Method::POST).with(likes))
-        .resource("/{id}/", |r| r.method(Method::POST).with(update))
+            .prefix("/accounts")
+            .resource("/filter/", |r| r.method(Method::GET).with(filter))
+            .resource("/group/", |r| r.method(Method::GET).f(index))
+            .resource("/{id}/recommend/", |r| r.method(Method::GET).f(index))
+            .resource("/{id}/suggest/", |r| r.method(Method::GET).f(index))
+            .resource("/new/", |r| r.method(Method::POST).with(new))
+            .resource("/likes/", |r| r.method(Method::POST).with(likes))
+            .resource("/{id}/", |r| r.method(Method::POST).with(update))
     })
-    .backlog(8192)
-    .keep_alive(120)
-    //        .workers(8)
-    .bind(addr)
-    .unwrap()
-    .shutdown_timeout(1)
-    .start();
+        .backlog(8192)
+        .keep_alive(120)
+        //        .workers(8)
+        .bind(addr)
+        .unwrap()
+        .shutdown_timeout(1)
+        .start();
     println!("Started http server: {}", addr);
     memory_info();
     let _ = sys.run();

@@ -544,6 +544,7 @@ dependencies = [
  "env_logger 0.5.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "fnv 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.25 (registry+https://github.com/rust-lang/crates.io-index)",
+ "indexmap 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "itertools 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "json 0.11.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.82 (registry+https://github.com/rust-lang/crates.io-index)",
