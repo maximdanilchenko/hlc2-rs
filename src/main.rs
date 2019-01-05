@@ -49,11 +49,11 @@ impl DataBase {
         DataBase {
             accounts: BTreeMap::new(),
             interests: IndexSet::new(),
-            countries: FnvHashMap::default(),
-            cities: FnvHashMap::default(),
+            countries: IndexSet::default(),
+            cities: IndexSet::default(),
             emails: BTreeMap::new(),
-            phone_codes: FnvHashMap::default(),
-            email_domains: FnvHashMap::default(),
+            phone_codes: IndexSet::default(),
+            email_domains: IndexSet::default(),
         }
     }
 
@@ -164,77 +164,29 @@ impl DataBase {
         //        println!("Emails total num: {}", self.emails.len());
     }
 
-    fn insert_to_domains(&mut self, uid: &u32, mail: String) {
+    fn insert_to_domains(&mut self, mail: String) -> usize {
         let vec: Vec<&str> = mail.split('@').collect();
         if let Some(domain) = vec.get(1) {
-            self.email_domains
-                .entry(domain.to_string())
-                .or_insert(BTreeSet::new())
-                .insert(uid.clone());
-        }
+            self.email_domains.insert_full(domain.to_string()).0
+        } else { 0 }
     }
 
-    fn delete_from_domains(&mut self, uid: &u32, mail: String) {
-        let vec: Vec<&str> = mail.split('@').collect();
-        if let Some(domain) = vec.get(1) {
-            self.email_domains
-                .entry(domain.to_string())
-                .and_modify(|set| { set.remove(uid); });
-        }
-    }
-
-    fn insert_to_codes(&mut self, uid: &u32, phone: String) {
+    fn insert_to_codes(&mut self, phone: String) -> usize {
         if let Some(phone_code) = phone.get(2..5) {
-            self.phone_codes
-                .entry(phone_code.to_string())
-                .or_insert(BTreeSet::new())
-                .insert(uid.clone());
-        }
+            self.phone_codes.insert_full(phone_code.to_string()).0
+        } else { 0 }
     }
 
-    fn delete_from_codes(&mut self, uid: &u32, phone: String) {
-        if let Some(phone_code) = phone.get(2..5) {
-            self.phone_codes
-                .entry(phone_code.to_string())
-                .and_modify(|set| { set.remove(uid); });
-        }
+    fn insert_to_country(&mut self, country: String) -> usize {
+        self.countries.insert_full(country).0
     }
 
-    fn insert_to_country(&mut self, uid: &u32, country: String) {
-        self.countries
-            .entry(country)
-            .or_insert(BTreeSet::new())
-            .insert(uid.clone());
+    fn insert_to_city(&mut self, city: String) -> usize {
+        self.cities.insert_full(city).0
     }
 
-    fn delete_from_country(&mut self, uid: &u32, country: String) {
-        self.countries
-            .entry(country)
-            .and_modify(|set| { set.remove(uid); });
-    }
-
-    fn insert_to_city(&mut self, uid: &u32, city: String) {
-        self.cities
-            .entry(city)
-            .or_insert(BTreeSet::new())
-            .insert(uid.clone());
-    }
-
-    fn delete_from_city(&mut self, uid: &u32, city: String) {
-        self.cities.entry(city).and_modify(|set| {
-            set.remove(uid);
-        });
-    }
-
-    fn insert_to_interests(&mut self, interest: String) -> u32 {
-        self.interests.insert_full(interest).0 as u32
-        //            self.interests.extend(interests.into_iter());
-//        for elem in interests {
-//            self.interests
-//                .entry(elem)
-//                .or_insert(BTreeSet::new())
-//                .insert(uid.clone());
-//        }
+    fn insert_to_interests(&mut self, interest: String) -> usize {
+        self.interests.insert_full(interest).0
     }
 
     fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
@@ -243,8 +195,8 @@ impl DataBase {
             None => return Err(StatusCode::NOT_FOUND),
         };
 
-        if let Some(email) = &account.email {
-            match self.emails.get(email) {
+        if let Some(email) = account.email {
+            match self.emails.get(&email) {
                 None => (),
                 Some(other_uid) => {
                     if *other_uid != uid {
@@ -252,8 +204,13 @@ impl DataBase {
                     };
                 }
             };
+            let vec: Vec<&str> = email.split('@').collect();
+            new_account.email_domain = match vec.get(1) {
+                Some(domain) => self.email_domains.insert_full(domain.to_string()).0,
+                None => 0
+            };
             new_account.email = email.clone();
-            self.emails.insert(email.clone(), uid);
+            self.emails.insert(email, uid);
         };
 
         if let Some(sex) = account.sex {
@@ -272,8 +229,13 @@ impl DataBase {
             new_account.sname = Some(sname);
         };
 
-        if let Some(phone) = &account.phone {
-            new_account.phone = Some(phone.clone());
+        if let Some(phone) = account.phone {
+            new_account.phone_code =
+                match phone.get(2..5) {
+                    Some(phone_code) => Some(self.phone_codes.insert_full(phone_code.to_string()).0),
+                    None => None
+                };
+            new_account.phone = Some(phone);
         };
 
         if let Some(birth) = account.birth {
@@ -292,17 +254,17 @@ impl DataBase {
             new_account.likes.extend(likes);
         };
 
-        if let Some(country) = &account.country {
-            new_account.country = Some(country.clone());
+        if let Some(country) = account.country {
+            new_account.country = Some(self.countries.insert_full(country).0);
         };
 
-        if let Some(city) = &account.city {
-            new_account.city = Some(city.clone());
+        if let Some(city) = account.city {
+            new_account.city = Some(self.cities.insert_full(city).0);
         };
 
         if let Some(interests) = account.interests {
             for elem in interests {
-                let index = self.interests.insert_full(elem).0 as u32;
+                let index = self.interests.insert_full(elem).0;
                 new_account.interests.insert(index);
             }
 //            new_account.interests.extend(interests
@@ -310,25 +272,25 @@ impl DataBase {
 //                .map(|interest| self.interests.insert_full(interest).0 as u32));
         };
 
-        if let Some(city) = account.city {
-            self.delete_from_city(&uid, city.clone());
-            self.insert_to_city(&uid, city);
-        };
+//        if let Some(city) = account.city {
+//            self.delete_from_city(&uid, city.clone());
+//            self.insert_to_city(&uid, city);
+//        };
+//
+//        if let Some(country) = account.country {
+//            self.delete_from_country(&uid, country.clone());
+//            self.insert_to_country(&uid, country);
+//        };
 
-        if let Some(country) = account.country {
-            self.delete_from_country(&uid, country.clone());
-            self.insert_to_country(&uid, country);
-        };
-
-        if let Some(mail) = account.email {
-            self.delete_from_domains(&uid, mail.clone());
-            self.insert_to_domains(&uid, mail);
-        };
-
-        if let Some(phone) = account.phone {
-            self.delete_from_codes(&uid, phone.clone());
-            self.insert_to_codes(&uid, phone);
-        };
+//        if let Some(mail) = account.email {
+//            self.delete_from_domains(&uid, mail.clone());
+//            self.insert_to_domains(&uid, mail);
+//        };
+//
+//        if let Some(phone) = account.phone {
+//            self.delete_from_codes(&uid, phone.clone());
+//            self.insert_to_codes(&uid, phone);
+//        };
 
         Ok(uid)
     }
@@ -355,29 +317,30 @@ impl DataBase {
 
         let city = match account.city {
             Some(city) => {
-                self.insert_to_city(&uid, city.clone());
-                Some(city)
+                Some(self.cities.insert_full(city).0)
             }
             None => None,
         };
 
         let country = match account.country {
             Some(country) => {
-                self.insert_to_country(&uid, country.clone());
-                Some(country)
+                Some(self.countries.insert_full(country).0)
             }
             None => None,
         };
 
-        let phone = match account.phone {
+        let phone_code = match &account.phone {
             Some(phone) => {
-                self.insert_to_codes(&uid, phone.clone());
-                Some(phone)
+                match phone.get(2..5) {
+                    Some(phone_code) => Some(self.phone_codes.insert_full(phone_code.to_string()).0),
+                    None => None
+                }
             }
             None => None,
         };
 
-        let interests: BTreeSet<u32> = match account.interests {
+
+        let interests: BTreeSet<usize> = match account.interests {
             Some(vec) => {
                 vec
                     .into_iter()
@@ -387,7 +350,7 @@ impl DataBase {
         };
 
         self.emails.insert(account.email.clone(), uid);
-        self.insert_to_domains(&uid, account.email.clone());
+        let email_domain = self.insert_to_domains(account.email.clone());
 
         self.accounts.insert(
             uid,
@@ -395,7 +358,7 @@ impl DataBase {
                 email: account.email,
                 fname: account.fname,
                 sname: account.sname,
-                phone,
+                phone: account.phone,
                 sex: account.sex,
                 birth: account.birth,
                 joined: account.joined,
@@ -405,6 +368,8 @@ impl DataBase {
                 city,
                 likes,
                 interests,
+                phone_code,
+                email_domain,
             },
         );
         Ok(uid)
@@ -548,39 +513,46 @@ impl DataBase {
             None => None,
         };
 
-        let city_any_filter: Option<HashSet<String>> = match &filters.city_any {
+        let city_any_filter: Option<HashSet<usize>> = match &filters.city_any {
             Some(cities) => Some(HashSet::from_iter(
-                cities.split(',').into_iter().map(|s| s.to_string()),
+                cities.split(',')
+                    .into_iter()
+                    .map(|s| if let Some((i, _)) = self.cities.get_full(s) {
+                        i
+                    } else {
+                        0
+                    })
+                    .filter(|i| i > &0)
             )),
             None => None,
         };
 
-        let interests_any_filter: Option<BTreeSet<u32>> = match &filters.interests_any {
+        let interests_any_filter: Option<BTreeSet<usize>> = match &filters.interests_any {
             Some(interests) => Some(BTreeSet::from_iter(
                 interests.split(',')
                     .into_iter()
                     .map(|s| {
                         if let Some((i, _)) = self.interests.get_full(s) {
-                            i as u32
+                            i
                         } else {
                             0
                         }
-                    }),
+                    }).filter(|i| i > &0)
             )),
             None => None,
         };
 
-        let interests_contains_filter: Option<BTreeSet<u32>> = match &filters.interests_contains {
+        let interests_contains_filter: Option<BTreeSet<usize>> = match &filters.interests_contains {
             Some(interests) => Some(BTreeSet::from_iter(
                 interests.split(',')
                     .into_iter()
                     .map(|s| {
                         if let Some((i, _)) = self.interests.get_full(s) {
-                            i as u32
+                            i
                         } else {
                             0
                         }
-                    }),
+                    }).filter(|i| i > &0)
             )),
             None => None,
         };
@@ -716,9 +688,13 @@ impl DataBase {
                 _ => (),
             }
         } else if let Some(val) = &filters.country_eq {
+            let country_eq = match self.countries.get_full(val) {
+                Some((i, _)) => i,
+                None => return Ok(json!({"accounts": []}))
+            };
             filters_fns.push(Box::new(move |acc: &Account|
                 if let Some(country) = &acc.country
-                    { country == val } else { false }
+                    { *country == country_eq } else { false }
             ));
         };
 
@@ -733,9 +709,13 @@ impl DataBase {
                 _ => (),
             }
         } else if let Some(val) = &filters.city_eq {
+            let city_eq = match self.cities.get_full(val) {
+                Some((i, _)) => i,
+                None => return Ok(json!({"accounts": []}))
+            };
             filters_fns.push(Box::new(move |acc: &Account| {
                 if let Some(city) = &acc.city
-                    { city == val } else { false }
+                    { *city == city_eq } else { false }
             }
             ));
         } else if let Some(cities) = city_any_filter {
@@ -894,20 +874,40 @@ impl DataBase {
             };
 
             if let Some(_) = filters.city_any {
-                elem.insert("city", json!(acc.city));
+                if let Some(city) = acc.city {
+                    if let Some(city) = self.cities.get_index(city) {
+                        elem.insert("city", json!(city));
+                    }
+                }
             } else if let Some(_) = filters.city_eq {
-                elem.insert("city", json!(acc.city));
+                if let Some(city) = acc.city {
+                    if let Some(city) = self.cities.get_index(city) {
+                        elem.insert("city", json!(city));
+                    }
+                }
             } else if let Some(val) = filters.city_null {
                 if val == 0 {
-                    elem.insert("city", json!(acc.city));
+                    if let Some(city) = acc.city {
+                        if let Some(city) = self.cities.get_index(city) {
+                            elem.insert("city", json!(city));
+                        }
+                    }
                 };
             };
 
             if let Some(_) = filters.country_eq {
-                elem.insert("country", json!(acc.country));
+                if let Some(country) = acc.country {
+                    if let Some(country) = self.countries.get_index(country) {
+                        elem.insert("country", json!(country));
+                    }
+                }
             } else if let Some(val) = filters.country_null {
                 if val == 0 {
-                    elem.insert("country", json!(acc.country));
+                    if let Some(country) = acc.country {
+                        if let Some(country) = self.countries.get_index(country) {
+                            elem.insert("country", json!(country));
+                        }
+                    }
                 };
             };
 
@@ -944,15 +944,15 @@ struct Account {
     phone: Option<String>,
     sex: Sex,
     birth: i64,
-    country: Option<u32>,
-    city: Option<u32>,
+    country: Option<usize>,
+    city: Option<usize>,
     joined: i64,
     status: Status,
     premium: Option<Premium>,
     likes: Vec<Likes>,
-    interests: BTreeSet<u32>,
-    email_domain: u32,
-    phone_code: u32,
+    interests: BTreeSet<usize>,
+    email_domain: usize,
+    phone_code: Option<usize>,
 
 }
 
