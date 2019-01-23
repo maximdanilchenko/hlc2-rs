@@ -30,3 +30,11 @@ chrono = "0.4"
 
 fnv = "1.0.3"
 indexmap = "1.0.2"
+radix_trie = "0.1.4"
+flat_map = "0.0.8"
+hashbrown = "0.1.7"
+
+smallvec = "0.6.7"
+smallset = "0.1.0"
+
+parking_lot = "0.7.1"

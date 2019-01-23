@@ -6,3 +6,5 @@ EXPOSE 80
 ENV PROD=true
 
 CMD ["/high-load-2-rst"]
+
+#\{"url": "/accounts/filter[^}]*body": \{[^}]*\},
