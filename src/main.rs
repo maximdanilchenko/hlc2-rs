@@ -65,8 +65,8 @@ struct DataBase {
     fnames: IndexMap<String, BTreeSet<u32>>,
     snames: IndexMap<String, BTreeSet<u32>>,
 
-    birth_index: hashbrown::HashMap<i32, BTreeSet<u32>>,
-    joined_index: hashbrown::HashMap<i32, BTreeSet<u32>>,
+    birth_index: hashbrown::HashMap<u32, BTreeSet<u32>>,
+    joined_index: hashbrown::HashMap<u32, BTreeSet<u32>>,
     snames_index: BTreeSet<String>,
 
     likes: hashbrown::HashMap<u32, BTreeSet<u32>>,
@@ -74,7 +74,7 @@ struct DataBase {
     liked: hashbrown::HashMap<u32, Vec<u32>>,
 
     groups: hashbrown::HashMap<Vec<GroupKeys>, hashbrown::HashMap<GroupKey, u32>>,
-    given_time: Option<i64>,
+    given_time: Option<u32>,
 
     premium_now: BTreeSet<u32>,
 
@@ -101,7 +101,7 @@ impl DataBase {
             interests: IndexMap::new(),
             countries: IndexMap::default(),
             cities: IndexMap::default(),
-            emails: hashbrown::HashSet::new(),
+            emails: hashbrown::HashSet::default(),
             phone_codes: IndexSet::default(),
             email_domains: IndexSet::default(),
             fnames: IndexMap::default(),
@@ -564,7 +564,7 @@ impl DataBase {
             };
 
             if let Some(birth) = account.birth {
-                let year = Utc.timestamp(birth, 0).year();
+                let year = Utc.timestamp(birth as i64, 0).year() as u32;
                 self.birth_index
                     .entry(year)
                     .and_modify(|v| { v.remove(&uid); });
@@ -576,7 +576,7 @@ impl DataBase {
             };
 
             if let Some(joined) = account.joined {
-                let year = Utc.timestamp(joined, 0).year();
+                let year = Utc.timestamp(joined  as i64, 0).year() as u32;
                 self.joined_index
                     .entry(year)
                     .and_modify(|v| { v.remove(&uid); });
@@ -818,13 +818,13 @@ impl DataBase {
             }
         }
 
-        let year = Utc.timestamp(account.birth, 0).year();
+        let year = Utc.timestamp(account.birth as i64, 0).year() as u32;
         self.birth_index
             .entry(year)
             .or_insert(BTreeSet::new())
             .insert(uid);
 
-        let year = Utc.timestamp(account.joined, 0).year();
+        let year = Utc.timestamp(account.joined as i64, 0).year() as u32;
         self.joined_index
             .entry(year)
             .or_insert(BTreeSet::new())
@@ -1017,7 +1017,7 @@ impl DataBase {
                 if self.given_time.is_some() {
                     indexes.push(&self.premium_now);
                 } else {
-                    let now = Local::now().timestamp();
+                    let now = Local::now().timestamp() as u32;
                     filters_fns.push(Box::new(move |acc: &Account| {
                         if let Some(val) = &acc.premium {
                             (val.start <= now) && (val.finish >= now)
@@ -1854,8 +1854,8 @@ enum Status {
 #[repr(C)]
 #[derive(Debug, Clone)]
 struct Account {
-    birth: i64,
-    joined: i64,
+    birth: u32,
+    joined: u32,
     email_domain: u16,
     fname: Option<u16>,
     sname: Option<u16>,
@@ -1877,8 +1877,8 @@ struct AccountFull {
     id: u32,
     sex: Sex,
     status: Status,
-    birth: i64,
-    joined: i64,
+    birth: u32,
+    joined: u32,
     premium: Option<Premium>,
     #[validate(contains = "@")]
     #[validate(length(min = "1", max = "100"))]
@@ -1910,12 +1910,12 @@ struct AccountOptional {
     #[validate(length(min = "1", max = "16"))]
     phone: Option<String>,
     sex: Option<Sex>,
-    birth: Option<i64>,
+    birth: Option<u32>,
     #[validate(length(min = "1", max = "50"))]
     country: Option<String>,
     #[validate(length(min = "1", max = "50"))]
     city: Option<String>,
-    joined: Option<i64>,
+    joined: Option<u32>,
     status: Option<Status>,
     interests: Option<Vec<String>>,
     premium: Option<Premium>,
@@ -1924,8 +1924,8 @@ struct AccountOptional {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Premium {
-    start: i64,
-    finish: i64,
+    start: u32,
+    finish: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1974,9 +1974,9 @@ struct Filters {
     city_any: Option<String>,
     #[validate(range(min = "0", max = "1"))]
     city_null: Option<u8>,
-    birth_lt: Option<i64>,
-    birth_gt: Option<i64>,
-    birth_year: Option<i32>,
+    birth_lt: Option<u32>,
+    birth_gt: Option<u32>,
+    birth_year: Option<u32>,
     interests_contains: Option<String>,
     interests_any: Option<String>,
     likes_contains: Option<String>,
@@ -2309,5 +2309,13 @@ fn memory_info() {
 // 2110M with liked
 // 1752M with groups and without liked
 // 1537M with groups and without liked and with u16 instead of usize
-// 1951M with groups and with liked(Vec) and with u16 instead of usize - плохо на третьей фазе
+// - 1951M with groups and with liked(Vec) and with u16 instead of usize - плохо на третьей фазе
+// 1942M with groups and with liked(Vec) and with u16 instead of usize and with fnv emails
 // 2103M with groups and with liked(hashbrown::HashSet) and with u16 instead of usize
+// 1547M without accs
+// 1865M without interests
+// 1869M with optimized timestamps
+
+
+// interests - 86
+// accs - 404
