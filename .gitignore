@@ -3,3 +3,5 @@
 *.zip
 .DS_Store
 .idea*
+*.zip
+options.txt
