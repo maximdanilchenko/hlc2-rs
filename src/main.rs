@@ -36,6 +36,7 @@ use actix_web::http::{header, Method, StatusCode};
 use actix_web::{error, server, App, HttpResponse, Json, Path, Query, State};
 use itertools::Itertools;
 use validator::Validate;
+use futures::future::{result, FutureResult};
 //use flat_map::FlatMap;
 
 use chrono::{TimeZone, Utc, Local, Datelike};
@@ -52,7 +53,230 @@ struct AppState {
 }
 
 // city, country, interest, sex, status
-type GroupKey = (Option<u16>, Option<u16>, Option<u16>, Sex, Status);
+type GroupKey = (Option<u16>, Option<u16>, Option<u16>, Sex, Status, Option<u32>);
+
+type Pair = (u8, u32);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GK {
+    City(Option<u16>),
+    Country(Option<u16>),
+    Interest(Option<u16>),
+    Sex(Sex),
+    Status(Status),
+    Joined(Option<u16>),
+//    Birth(Option<u16>),
+}
+
+struct GroupIndex {
+    groups: hashbrown::HashMap<Vec<GroupKeys>, hashbrown::HashMap<Vec<GK>, u32>>
+}
+
+impl GroupIndex {
+    fn new() -> GroupIndex {
+        GroupIndex { groups: hashbrown::HashMap::new() }
+    }
+
+    fn add(&mut self, acc: &Account, joined: Option<u16>, birth: Option<u16>) {
+        for key in [
+            vec![GroupKeys::Sex, GroupKeys::Status],
+            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status],
+            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
+            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
+            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+        ].iter() {
+            *self.groups.entry(key.clone())
+                .or_insert(hashbrown::HashMap::new())
+                .entry(key.iter().map(|k| match k {
+                    GroupKeys::City => GK::City(acc.city),
+                    GroupKeys::Country => GK::Country(acc.country),
+                    GroupKeys::Interests => GK::Interest(None),
+                    GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+                    GroupKeys::Status => GK::Status(acc.status.clone()),
+                    GroupKeys::Joined => GK::Joined(joined),
+//                     GroupKeys::Birth => GK::Birth(birth),
+                }).collect())
+                .or_insert(0) += 1;
+        }
+
+        if acc.interests.is_empty() {
+            for key in [
+                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+            ].iter() {
+                *self.groups.entry(key.clone())
+                    .or_insert(hashbrown::HashMap::new())
+                    .entry(key.iter().map(|k| match k {
+                        GroupKeys::City => GK::City(acc.city),
+                        GroupKeys::Country => GK::Country(acc.country),
+                        GroupKeys::Interests => GK::Interest(None),
+                        GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+                        GroupKeys::Status => GK::Status(acc.status.clone()),
+                        GroupKeys::Joined => GK::Joined(joined),
+//                         GroupKeys::Birth => GK::Birth(birth),
+                    }).collect())
+                    .or_insert(0) += 1;
+            }
+        } else {
+            for interest in &acc.interests {
+                for key in [
+                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+                ].iter() {
+                    *self.groups.entry(key.clone())
+                        .or_insert(hashbrown::HashMap::new())
+                        .entry(key.iter().map(|k| match k {
+                            GroupKeys::City => GK::City(acc.city),
+                            GroupKeys::Country => GK::Country(acc.country),
+                            GroupKeys::Interests => GK::Interest(Some(interest.clone())),
+                            GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+                            GroupKeys::Status => GK::Status(acc.status.clone()),
+                            GroupKeys::Joined => GK::Joined(joined),
+//                            GroupKeys::Birth => GK::Birth(birth),
+                        }).collect())
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+//    fn remove(&mut self, acc: &Account, joined: Option<u16>, birth: Option<u16>) {
+//        for key in [
+//            vec![GroupKeys::Sex, GroupKeys::Status],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
+//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//        ].iter() {
+//             self.groups.entry(key.clone())
+//                 .and_modify(|group| {group
+//                         .entry(key.iter().map(|k| match k {
+//                             GroupKeys::City => GK::City(acc.city),
+//                             GroupKeys::Country => GK::Country(acc.country),
+//                             GroupKeys::Interests => GK::Interest(None),
+//                             GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+//                             GroupKeys::Status => GK::Status(acc.status.clone()),
+//                             GroupKeys::Joined => GK::Joined(joined),
+//                             GroupKeys::Birth => GK::Birth(birth),
+//                         }).collect())
+//                     .and_modify(|entry| *entry -= 1);});
+//        }
+//
+//        if acc.interests.is_empty() {
+//            for key in [
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//            ].iter() {
+//                 self.groups.entry(key.clone())
+//                     .and_modify(|group| {group
+//                             .entry(key.iter().map(|k| match k {
+//                                 GroupKeys::City => GK::City(acc.city),
+//                                 GroupKeys::Country => GK::Country(acc.country),
+//                                 GroupKeys::Interests => GK::Interest(None),
+//                                 GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+//                                 GroupKeys::Status => GK::Status(acc.status.clone()),
+//                                 GroupKeys::Joined => GK::Joined(joined),
+//                                 GroupKeys::Birth => GK::Birth(birth),
+//                             }).collect())
+//                         .and_modify(|entry| *entry -= 1);});
+//            }
+//        } else {
+//            for interest in &acc.interests {
+//                for key in [
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
+//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
+//                ].iter() {
+//                    self.groups.entry(key.clone())
+//                        .and_modify(|group| {group
+//                                .entry(key.iter().map(|k| match k {
+//                                    GroupKeys::City => GK::City(acc.city),
+//                                    GroupKeys::Country => GK::Country(acc.country),
+//                                    GroupKeys::Interests => GK::Interest(Some(interest.clone())),
+//                                    GroupKeys::Sex => GK::Sex(acc.sex.clone()),
+//                                    GroupKeys::Status => GK::Status(acc.status.clone()),
+//                                    GroupKeys::Joined => GK::Joined(joined),
+//                                    GroupKeys::Birth => GK::Birth(birth),
+//                                }).collect())
+//                            .and_modify(|entry| *entry -= 1);});
+//                }
+//            }
+//        }
+//    }
+}
 
 struct DataBase {
     accounts: BTreeMap<u32, Account>,
@@ -76,6 +300,8 @@ struct DataBase {
     liked: hashbrown::HashMap<u32, Vec<u32>>,
 
     groups: hashbrown::HashMap<Vec<GroupKeys>, hashbrown::HashMap<GroupKey, u32>>,
+
+    group_index: GroupIndex,
     given_time: Option<u32>,
 
     premium_now: BTreeSet<u32>,
@@ -92,11 +318,20 @@ impl DataBase {
         groups.insert(vec![GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
-        groups.insert(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+
+        groups.insert(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
         groups.insert(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
+        groups.insert(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined], hashbrown::HashMap::new());
 
         DataBase {
             accounts: BTreeMap::new(),
@@ -117,6 +352,7 @@ impl DataBase {
             liked: hashbrown::HashMap::new(),
 
             groups,
+            group_index: GroupIndex::new(),
 
             given_time: None,
 
@@ -294,7 +530,8 @@ impl DataBase {
         println!(
             "Accs: {}, countries: {}, cities: {}, emails: {}, \
              interests: {}(cap: {}), codes: {}, doms: {}, fnames: {}, \
-             snames: {}, likes: {}, liked: {}, snames_index: {}, birth_index: {}, joined_index: {}, groups_map: {}",
+             snames: {}, likes: {}, liked: {}, snames_index: {}, \
+             birth_index: {}, joined_index: {}, groups_map: {}, premium_now: {}",
             self.accounts.len(),
             self.countries.len(),
             self.cities.len(),
@@ -310,181 +547,228 @@ impl DataBase {
             self.snames_index.len(),
             self.birth_index.len(),
             self.joined_index.len(),
-            self.groups.len(),
+            self.groups.values().map(|i| i.len()).sum::<usize>(),
+            self.premium_now.len(),
         );
     }
 
-    fn subtract_from_group(&mut self, acc: &Account) {
+    fn subtract_from_group(&mut self, acc: &Account, joined: Option<u32>, birth: Option<u32>) {
         self.groups.entry(vec![GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index| {
                 index
                     .entry(
-                        (None, None, None, acc.sex.clone(), acc.status.clone())
+                        (None, None, None, acc.sex.clone(), acc.status.clone(), None)
                     ).and_modify(|v| *v -= 1);
             });
         self.groups.entry(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index| {
                 index
                     .entry(
-                        (acc.city, None, None, acc.sex.clone(), acc.status.clone())
+                        (acc.city, None, None, acc.sex.clone(), acc.status.clone(), None)
                     ).and_modify(|v| *v -= 1);
             });
         self.groups.entry(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index| {
                 index
                     .entry(
-                        (None, acc.country, None, acc.sex.clone(), acc.status.clone())
+                        (None, acc.country, None, acc.sex.clone(), acc.status.clone(), None)
                     ).and_modify(|v| *v -= 1);
             });
         self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index| {
                 index
                     .entry(
-                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone())
+                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone(), None)
+                    ).and_modify(|v| *v -= 1);
+            });
+        self.groups.entry(vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index| {
+                index
+                    .entry(
+                        (None, None, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).and_modify(|v| *v -= 1);
+            });
+        self.groups.entry(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index| {
+                index
+                    .entry(
+                        (acc.city, None, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).and_modify(|v| *v -= 1);
+            });
+        self.groups.entry(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index| {
+                index
+                    .entry(
+                        (None, acc.country, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).and_modify(|v| *v -= 1);
+            });
+        self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index| {
+                index
+                    .entry(
+                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone(), joined)
                     ).and_modify(|v| *v -= 1);
             });
 
-        if acc.interests.is_empty() {
+        for interest in &acc.interests {
             self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index| {
                     index
                         .entry(
-                            (None, None, None, acc.sex.clone(), acc.status.clone())
+                            (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).and_modify(|v| *v -= 1);
                 });
             self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index| {
                     index
                         .entry(
-                            (acc.city, None, None, acc.sex.clone(), acc.status.clone())
+                            (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).and_modify(|v| *v -= 1);
                 });
             self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index| {
                     index
                         .entry(
-                            (None, acc.country, None, acc.sex.clone(), acc.status.clone())
+                            (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).and_modify(|v| *v -= 1);
                 });
             self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index| {
                     index
                         .entry(
-                            (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone())
+                            (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).and_modify(|v| *v -= 1);
                 });
-        } else {
-            for interest in &acc.interests {
-                self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index| {
-                        index
-                            .entry(
-                                (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).and_modify(|v| *v -= 1);
-                    });
-                self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index| {
-                        index
-                            .entry(
-                                (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).and_modify(|v| *v -= 1);
-                    });
-                self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index| {
-                        index
-                            .entry(
-                                (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).and_modify(|v| *v -= 1);
-                    });
-                self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index| {
-                        index
-                            .entry(
-                                (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).and_modify(|v| *v -= 1);
-                    });
-            }
+            self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index| {
+                    index
+                        .entry(
+                            (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).and_modify(|v| *v -= 1);
+                });
+            self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index| {
+                    index
+                        .entry(
+                            (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).and_modify(|v| *v -= 1);
+                });
+            self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index| {
+                    index
+                        .entry(
+                            (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).and_modify(|v| *v -= 1);
+                });
+            self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index| {
+                    index
+                        .entry(
+                            (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).and_modify(|v| *v -= 1);
+                });
         }
     }
 
-    fn add_to_group(&mut self, acc: &Account) {
+    fn add_to_group(&mut self, acc: &Account, joined: Option<u32>, birth: Option<u32>) {
         self.groups.entry(vec![GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index|
                 *index
                     .entry(
-                        (None, None, None, acc.sex.clone(), acc.status.clone())
+                        (None, None, None, acc.sex.clone(), acc.status.clone(), None)
                     ).or_insert(0) += 1);
         self.groups.entry(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index|
                 *index
                     .entry(
-                        (acc.city, None, None, acc.sex.clone(), acc.status.clone())
+                        (acc.city, None, None, acc.sex.clone(), acc.status.clone(), None)
                     ).or_insert(0) += 1);
         self.groups.entry(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index|
                 *index
                     .entry(
-                        (None, acc.country, None, acc.sex.clone(), acc.status.clone())
+                        (None, acc.country, None, acc.sex.clone(), acc.status.clone(), None)
                     ).or_insert(0) += 1);
         self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status])
             .and_modify(|index|
                 *index
                     .entry(
-                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone())
+                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone(), None)
+                    ).or_insert(0) += 1);
+        self.groups.entry(vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index|
+                *index
+                    .entry(
+                        (None, None, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).or_insert(0) += 1);
+        self.groups.entry(vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index|
+                *index
+                    .entry(
+                        (acc.city, None, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).or_insert(0) += 1);
+        self.groups.entry(vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index|
+                *index
+                    .entry(
+                        (None, acc.country, None, acc.sex.clone(), acc.status.clone(), joined)
+                    ).or_insert(0) += 1);
+        self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+            .and_modify(|index|
+                *index
+                    .entry(
+                        (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone(), joined)
                     ).or_insert(0) += 1);
 
-        if acc.interests.is_empty() {
+        for interest in &acc.interests {
             self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index|
                     *index
                         .entry(
-                            (None, None, None, acc.sex.clone(), acc.status.clone())
+                            (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).or_insert(0) += 1);
             self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index|
                     *index
                         .entry(
-                            (acc.city, None, None, acc.sex.clone(), acc.status.clone())
+                            (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).or_insert(0) += 1);
             self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index|
                     *index
                         .entry(
-                            (None, acc.country, None, acc.sex.clone(), acc.status.clone())
+                            (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).or_insert(0) += 1);
             self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
                 .and_modify(|index|
                     *index
                         .entry(
-                            (acc.city, acc.country, None, acc.sex.clone(), acc.status.clone())
+                            (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), None)
                         ).or_insert(0) += 1);
-        } else {
-            for interest in &acc.interests {
-                self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index|
-                        *index
-                            .entry(
-                                (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).or_insert(0) += 1);
-                self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index|
-                        *index
-                            .entry(
-                                (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).or_insert(0) += 1);
-                self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index|
-                        *index
-                            .entry(
-                                (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).or_insert(0) += 1);
-                self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status])
-                    .and_modify(|index|
-                        *index
-                            .entry(
-                                (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone())
-                            ).or_insert(0) += 1);
-            }
+            self.groups.entry(vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index|
+                    *index
+                        .entry(
+                            (None, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).or_insert(0) += 1);
+            self.groups.entry(vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index|
+                    *index
+                        .entry(
+                            (acc.city, None, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).or_insert(0) += 1);
+            self.groups.entry(vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index|
+                    *index
+                        .entry(
+                            (None, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).or_insert(0) += 1);
+            self.groups.entry(vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined])
+                .and_modify(|index|
+                    *index
+                        .entry(
+                            (acc.city, acc.country, Some(interest.clone()), acc.sex.clone(), acc.status.clone(), joined)
+                        ).or_insert(0) += 1);
         }
     }
 
@@ -515,7 +799,7 @@ impl DataBase {
             None => return Err(StatusCode::NOT_FOUND),
         };
         let old_account = new_account.clone();
-        let new_account = {
+        let (new_account, joined_year, birth_year) = {
             if let Some(email) = account.email {
                 if self.emails.contains(&email) {
                     if email != new_account.email {
@@ -567,7 +851,7 @@ impl DataBase {
                 new_account.phone = Some(phone);
             };
 
-            if let Some(birth) = account.birth {
+            let birth_year = if let Some(birth) = account.birth {
                 let year = Utc.timestamp(birth as i64, 0).year() as u32;
                 self.birth_index
                     .entry(year)
@@ -577,18 +861,24 @@ impl DataBase {
                     .or_insert(BTreeSet::new())
                     .insert(uid);
                 new_account.birth = birth;
+                year
+            } else {
+                Utc.timestamp(new_account.birth as i64, 0).year() as u32
             };
 
-            if let Some(joined) = account.joined {
-                let year = Utc.timestamp(joined as i64, 0).year() as u32;
+            let joined_year = if let Some(joined) = account.joined {
+                let joined_year = Utc.timestamp(joined as i64, 0).year() as u32;
                 self.joined_index
-                    .entry(year)
+                    .entry(joined_year)
                     .and_modify(|v| { v.remove(&uid); });
                 self.joined_index
-                    .entry(year)
+                    .entry(joined_year)
                     .or_insert(BTreeSet::new())
                     .insert(uid);
                 new_account.joined = joined;
+                joined_year
+            } else {
+                Utc.timestamp(new_account.joined as i64, 0).year() as u32
             };
 
             if let Some(premium) = account.premium {
@@ -695,11 +985,11 @@ impl DataBase {
                     new_account.interests.push(index);
                 }
             };
-            new_account.clone()
+            (new_account.clone(), joined_year, birth_year)
         };
 
-        self.subtract_from_group(&old_account);
-        self.add_to_group(&new_account);
+        self.subtract_from_group(&old_account, Some(joined_year), Some(birth_year));
+        self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
         Ok(uid)
     }
 
@@ -824,15 +1114,15 @@ impl DataBase {
             }
         }
 
-        let year = Utc.timestamp(account.birth as i64, 0).year() as u32;
+        let birth_year = Utc.timestamp(account.birth as i64, 0).year() as u32;
         self.birth_index
-            .entry(year)
+            .entry(birth_year)
             .or_insert(BTreeSet::new())
             .insert(uid);
 
-        let year = Utc.timestamp(account.joined as i64, 0).year() as u32;
+        let joined_year = Utc.timestamp(account.joined as i64, 0).year() as u32;
         self.joined_index
-            .entry(year)
+            .entry(joined_year)
             .or_insert(BTreeSet::new())
             .insert(uid);
 
@@ -852,7 +1142,8 @@ impl DataBase {
             phone_code,
             email_domain,
         };
-        self.add_to_group(&new_account);
+        self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
+//        self.group_index.add(&new_account, Some(joined_year as u16), Some(birth_year as u16));
         self.accounts.insert(
             uid,
             new_account,
@@ -885,6 +1176,7 @@ impl DataBase {
             // ФИЛЬТРЫ ЧЕРЕЗ ИНДЕКСЫ
 
             let mut indexes = SmallVec::<[&BTreeSet<u32>; 4]>::new();
+//            let mut main_index: Option<&BTreeSet<u32>> = None;
             let mut indexes_options = Vec::new();
             let mut indexes_likes: Vec<BTreeSet<&u32>> = Vec::new();
             let mut filters_fns = SmallVec::<[Box<Fn(&Account) -> bool>; 4]>::new();
@@ -907,47 +1199,70 @@ impl DataBase {
                 }
             }
 
-            for (filter, index, n) in [
-                (&filters.sname_eq, &self.snames, 0),
-                (&filters.city_eq, &self.cities, 1),
-                (&filters.fname_eq, &self.fnames, 2),
-                (&filters.country_eq, &self.countries, 4),
-            ].iter() {
-                if let Some(val) = filter {
-                    if indexes.is_empty() {
-                        if let Some(res) = index.get(val) {
-                            indexes.push(res);
-                        } else {
-                            return Ok(json!({"accounts": []}));
-                        }
+            if let Some(val) = &filters.sname_eq {
+                if !indexes.is_empty() {
+                    if let Some((number, _, _)) = self.snames.get_full(val) {
+                        let number = Some(number as u16);
+                        filters_fns.push(Box::new(move |acc: &Account| acc.sname == number));
                     } else {
-                        match n {
-                            1 => {
-                                if let Some((number, _, _)) = index.get_full(val) {
-                                    let number = Some(number as u16);
-                                    filters_fns.push(Box::new(move |acc: &Account| acc.city == number));
-                                } else {
-                                    return Ok(json!({"accounts": []}));
-                                }
-                            }
-                            2 => {
-                                if let Some((number, _, _)) = index.get_full(val) {
-                                    let number = Some(number as u16);
-                                    filters_fns.push(Box::new(move |acc: &Account| acc.fname == number));
-                                } else {
-                                    return Ok(json!({"accounts": []}));
-                                }
-                            }
-                            4 => {
-                                if let Some((number, _, _)) = index.get_full(val) {
-                                    let number = Some(number as u16);
-                                    filters_fns.push(Box::new(move |acc: &Account| acc.country == number));
-                                } else {
-                                    return Ok(json!({"accounts": []}));
-                                }
-                            }
-                            _ => ()
-                        }
+                        return Ok(json!({"accounts": []}));
+                    }
+                } else {
+                    if let Some(res) = self.snames.get(val) {
+                        indexes.push(res);
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                }
+            }
+
+            if let Some(val) = &filters.city_eq {
+                if !indexes.is_empty() {
+                    if let Some((number, _, _)) = self.cities.get_full(val) {
+                        let number = Some(number as u16);
+                        filters_fns.push(Box::new(move |acc: &Account| acc.city == number));
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                } else {
+                    if let Some(res) = self.cities.get(val) {
+                        indexes.push(res);
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                }
+            }
+
+            if let Some(val) = &filters.fname_eq {
+                if !indexes.is_empty() {
+                    if let Some((number, _, _)) = self.fnames.get_full(val) {
+                        let number = Some(number as u16);
+                        filters_fns.push(Box::new(move |acc: &Account| acc.fname == number));
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                } else {
+                    if let Some(res) = self.fnames.get(val) {
+                        indexes.push(res);
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                }
+            }
+
+            if let Some(val) = &filters.country_eq {
+                if !indexes.is_empty() {
+                    if let Some((number, _, _)) = self.countries.get_full(val) {
+                        let number = Some(number as u16);
+                        filters_fns.push(Box::new(move |acc: &Account| acc.country == number));
+                    } else {
+                        return Ok(json!({"accounts": []}));
+                    }
+                } else {
+                    if let Some(res) = self.countries.get(val) {
+                        indexes.push(res);
+                    } else {
+                        return Ok(json!({"accounts": []}));
                     }
                 }
             }
@@ -1353,7 +1668,9 @@ impl DataBase {
 
             result.push(elem);
         }
-        Ok(json!({ "accounts": result }))
+        Ok(json!({
+    "accounts": result
+}))
     }
 
     fn recommend(&self, uid: u32, suggest_filters: SuggestRecommend) -> Result<serde_json::Value, StatusCode> {
@@ -1361,7 +1678,11 @@ impl DataBase {
             Some(account) => account,
             None => return Err(StatusCode::NOT_FOUND),
         };
-//        account.interests;
+        if account.interests.is_empty() {
+            return Ok(json!({"accounts": []}));
+        }
+
+
 
         Ok(json!({"accounts": []}))
     }
@@ -1471,217 +1792,215 @@ impl DataBase {
             return Err(StatusCode::BAD_REQUEST);
         }
 
-        if group_filters.birth.is_some() ||
-            group_filters.joined.is_some() ||
-            group_filters.likes.is_some() ||
+        if group_filters.likes.is_some() ||
             group_filters.fname.is_some() ||
-            group_filters.sname.is_some() {
-            let mut filters_fns: Vec<Box<Fn(&u32, &Account) -> bool>> = vec![];
-            let mut indexes_likes: Option<BTreeSet<&u32>> = None;
-            let mut main_index: Option<&BTreeSet<u32>> = None;
+            group_filters.birth.is_some() ||
+            group_filters.sname.is_some()
+            {
+                let mut filters_fns: Vec<Box<Fn(&u32, &Account) -> bool>> = vec![];
+                let mut indexes_likes: Option<BTreeSet<&u32>> = None;
+                let mut main_index: Option<&BTreeSet<u32>> = None;
 
-            if let Some(filter) = &group_filters.likes {
-                if let Some(likes) = self.likes.get(filter) {
-                    indexes_likes = Some(likes.iter().map(|(like, _)| like).collect());
-                } else {
-                    return Ok(json!({"groups": []}));
-                }
-            } else {
-                return Ok(json!({"groups": []}));
-            }
-
-            if let Some(filter) = &group_filters.sname {
-                if let Some((index, _, snames)) = self.snames.get_full(filter) {
-                    if inde§xes_likes.is_some() || main_index.is_some() {
-                        let index = Some(index as u16);
-                        filters_fns.push(Box::new(move |_, acc: &Account| acc.sname == index));
+                if let Some(filter) = &group_filters.likes {
+                    if let Some(likes) = self.likes.get(filter) {
+                        indexes_likes = Some(likes.iter().map(|(like, _)| like).collect());
                     } else {
-                        main_index = Some(snames);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(val) = &group_filters.city {
-                if let Some((number, _, index)) = self.cities.get_full(val) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        let number = Some(number as u16);
-                        filters_fns.push(Box::new(move |_, acc: &Account| acc.city == number));
+                if let Some(filter) = &group_filters.sname {
+                    if let Some((index, _, snames)) = self.snames.get_full(filter) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            let index = Some(index as u16);
+                            filters_fns.push(Box::new(move |_, acc: &Account| acc.sname == index));
+                        } else {
+                            main_index = Some(snames);
+                        }
                     } else {
-                        main_index = Some(index);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(filter) = &group_filters.fname {
-                if let Some((index, _, fnames)) = self.fnames.get_full(filter) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        let index = Some(index as u16);
-                        filters_fns.push(Box::new(move |_, acc: &Account| acc.fname == index));
+                if let Some(val) = &group_filters.city {
+                    if let Some((number, _, index)) = self.cities.get_full(val) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            let number = Some(number as u16);
+                            filters_fns.push(Box::new(move |_, acc: &Account| acc.city == number));
+                        } else {
+                            main_index = Some(index);
+                        }
                     } else {
-                        main_index = Some(fnames);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(val) = &group_filters.interests {
-                if let Some((number, _, index)) = self.interests.get_full(val) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        let number = number as u16;
-                        filters_fns.push(Box::new(move |_, acc: &Account| acc.interests.contains(&number)));
+                if let Some(filter) = &group_filters.fname {
+                    if let Some((index, _, fnames)) = self.fnames.get_full(filter) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            let index = Some(index as u16);
+                            filters_fns.push(Box::new(move |_, acc: &Account| acc.fname == index));
+                        } else {
+                            main_index = Some(fnames);
+                        }
                     } else {
-                        main_index = Some(index);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(val) = &group_filters.country {
-                if let Some((number, _, index)) = self.countries.get_full(val) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        let number = Some(number as u16);
-                        filters_fns.push(Box::new(move |_, acc: &Account| acc.country == number));
+                if let Some(val) = &group_filters.interests {
+                    if let Some((number, _, index)) = self.interests.get_full(val) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            let number = number as u16;
+                            filters_fns.push(Box::new(move |_, acc: &Account| acc.interests.contains(&number)));
+                        } else {
+                            main_index = Some(index);
+                        }
                     } else {
-                        main_index = Some(index);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(filter) = &group_filters.birth {
-                if let Some(birth_index) = self.birth_index.get(filter) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        filters_fns.push(Box::new(move |uid: &u32, _| birth_index.contains(uid)));
+                if let Some(val) = &group_filters.country {
+                    if let Some((number, _, index)) = self.countries.get_full(val) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            let number = Some(number as u16);
+                            filters_fns.push(Box::new(move |_, acc: &Account| acc.country == number));
+                        } else {
+                            main_index = Some(index);
+                        }
                     } else {
-                        main_index = Some(birth_index);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
 
-            if let Some(filter) = &group_filters.joined {
-                if let Some(joined_index) = self.joined_index.get(filter) {
-                    if indexes_likes.is_some() || main_index.is_some() {
-                        filters_fns.push(Box::new(move |uid: &u32, _| joined_index.contains(uid)));
+                if let Some(filter) = &group_filters.birth {
+                    if let Some(birth_index) = self.birth_index.get(filter) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            filters_fns.push(Box::new(move |uid: &u32, _| birth_index.contains(uid)));
+                        } else {
+                            main_index = Some(birth_index);
+                        }
                     } else {
-                        main_index = Some(joined_index);
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    return Ok(json!({"groups": []}));
                 }
-            }
-            if let Some(val) = &group_filters.status {
-                filters_fns.push(Box::new(move |_, acc: &Account| &acc.status == val));
-            }
 
-            if let Some(val) = &group_filters.sex {
-                filters_fns.push(Box::new(move |_, acc: &Account| &acc.sex == val));
-            }
-
-            let has_interests = keys.contains(&GroupKeys::Interests);
-
-            let mut result = hashbrown::HashMap::new();
-
-            let city_key_func: fn(&Account) -> Option<usize> = {
-                if keys.contains(&GroupKeys::City) {
-                    |acc: &Account| match acc.city {
-                        Some(num) => Some(num as usize),
-                        _ => None
+                if let Some(filter) = &group_filters.joined {
+                    if let Some(joined_index) = self.joined_index.get(filter) {
+                        if indexes_likes.is_some() || main_index.is_some() {
+                            filters_fns.push(Box::new(move |uid: &u32, _| joined_index.contains(uid)));
+                        } else {
+                            main_index = Some(joined_index);
+                        }
+                    } else {
+                        return Ok(json!({"groups": []}));
                     }
-                } else {
-                    |_| None
                 }
-            };
+                if let Some(val) = &group_filters.status {
+                    filters_fns.push(Box::new(move |_, acc: &Account| &acc.status == val));
+                }
 
-            let country_key_func: fn(&Account) -> Option<usize> = {
-                if keys.contains(&GroupKeys::Country) {
-                    |acc: &Account| match acc.country {
-                        Some(num) => Some(num as usize),
-                        _ => None
+                if let Some(val) = &group_filters.sex {
+                    filters_fns.push(Box::new(move |_, acc: &Account| &acc.sex == val));
+                }
+
+                let has_interests = keys.contains(&GroupKeys::Interests);
+
+                let mut result = hashbrown::HashMap::new();
+
+                let city_key_func: fn(&Account) -> Option<usize> = {
+                    if keys.contains(&GroupKeys::City) {
+                        |acc: &Account| match acc.city {
+                            Some(num) => Some(num as usize),
+                            _ => None
+                        }
+                    } else {
+                        |_| None
                     }
-                } else {
-                    |_| None
-                }
-            };
+                };
 
-            let sex_key_func: fn(&Account) -> Option<&Sex> = {
-                if keys.contains(&GroupKeys::Sex) {
-                    |acc: &Account| Some(&acc.sex)
-                } else {
-                    |_| None
-                }
-            };
+                let country_key_func: fn(&Account) -> Option<usize> = {
+                    if keys.contains(&GroupKeys::Country) {
+                        |acc: &Account| match acc.country {
+                            Some(num) => Some(num as usize),
+                            _ => None
+                        }
+                    } else {
+                        |_| None
+                    }
+                };
 
-            let status_key_func: fn(&Account) -> Option<&Status> = {
-                if keys.contains(&GroupKeys::Status) {
-                    |acc: &Account| Some(&acc.status)
-                } else {
-                    |_| None
-                }
-            };
+                let sex_key_func: fn(&Account) -> Option<&Sex> = {
+                    if keys.contains(&GroupKeys::Sex) {
+                        |acc: &Account| Some(&acc.sex)
+                    } else {
+                        |_| None
+                    }
+                };
 
-            if let Some(index) = indexes_likes {
-                for (_, acc) in index.iter()
-                    .map(|k| (k, self.accounts.get(k).unwrap()))
-                    .filter(|(uid, acc)| filters_fns.iter().all(|f| f(uid, &acc))) {
-                    if has_interests {
-                        for interest in &acc.interests {
+                let status_key_func: fn(&Account) -> Option<&Status> = {
+                    if keys.contains(&GroupKeys::Status) {
+                        |acc: &Account| Some(&acc.status)
+                    } else {
+                        |_| None
+                    }
+                };
+
+                if let Some(index) = indexes_likes {
+                    for (_, acc) in index.iter()
+                        .map(|k| (k, self.accounts.get(k).unwrap()))
+                        .filter(|(uid, acc)| filters_fns.iter().all(|f| f(uid, &acc))) {
+                        if has_interests {
+                            for interest in &acc.interests {
+                                *result.entry((
+                                    city_key_func(acc),
+                                    country_key_func(acc),
+                                    Some(interest),
+                                    sex_key_func(acc),
+                                    status_key_func(acc),
+                                )).or_insert(0) += 1;
+                            }
+                        } else {
                             *result.entry((
                                 city_key_func(acc),
                                 country_key_func(acc),
-                                Some(interest),
+                                None,
                                 sex_key_func(acc),
                                 status_key_func(acc),
                             )).or_insert(0) += 1;
                         }
-                    } else {
-                        *result.entry((
-                            city_key_func(acc),
-                            country_key_func(acc),
-                            None,
-                            sex_key_func(acc),
-                            status_key_func(acc),
-                        )).or_insert(0) += 1;
                     }
-                }
-            } else if let Some(index) = main_index {
-                for (_, acc) in index.iter()
-                    .map(|k| (k, self.accounts.get(k).unwrap()))
-                    .filter(|(uid, acc)| filters_fns.iter().all(|f| f(uid, &acc))) {
-                    if has_interests {
-                        for interest in &acc.interests {
+                } else if let Some(index) = main_index {
+                    for (_, acc) in index.iter()
+                        .map(|k| (k, self.accounts.get(k).unwrap()))
+                        .filter(|(uid, acc)| filters_fns.iter().all(|f| f(uid, &acc))) {
+                        if has_interests {
+                            for interest in &acc.interests {
+                                *result.entry((
+                                    city_key_func(acc),
+                                    country_key_func(acc),
+                                    Some(interest),
+                                    sex_key_func(acc),
+                                    status_key_func(acc),
+                                )).or_insert(0) += 1;
+                            }
+                        } else {
                             *result.entry((
                                 city_key_func(acc),
                                 country_key_func(acc),
-                                Some(interest),
+                                None,
                                 sex_key_func(acc),
                                 status_key_func(acc),
                             )).or_insert(0) += 1;
                         }
-                    } else {
-                        *result.entry((
-                            city_key_func(acc),
-                            country_key_func(acc),
-                            None,
-                            sex_key_func(acc),
-                            status_key_func(acc),
-                        )).or_insert(0) += 1;
                     }
                 }
-            }
 
-            let mut result_groups = Vec::with_capacity(group_filters.limit);
+                let mut result_groups = Vec::with_capacity(group_filters.limit);
 
-            for (entity, count) in result
-                .iter()
+                for (entity, count) in result
+                    .iter()
 //                .filter(|(entity, _)|{
 //                    keys.contains(&GroupKeys::Sex) ||
 //                    keys.contains(&GroupKeys::Status) ||
@@ -1689,97 +2008,110 @@ impl DataBase {
 //                    (keys.contains(&GroupKeys::Country) && entity.1.is_some()) ||
 //                    (keys.contains(&GroupKeys::Interests) && entity.2.is_some())
 //                })
-                .sorted_by(|(entity_a, count_a), (entity_b, count_b)| match group_filters.order {
-                    Order::Asc =>
-                        count_a.cmp(count_b)
-                            .then((if keys.contains(&GroupKeys::City) && entity_a.0.is_some() {
-                                Some(self.cities.get_index(entity_a.0.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::City) && entity_b.0.is_some() {
-                                    Some(self.cities.get_index(entity_b.0.unwrap() as usize).unwrap().0)
-                                } else { None })))
-                            .then((if keys.contains(&GroupKeys::Country) && entity_a.1.is_some() {
-                                Some(self.countries.get_index(entity_a.1.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::Country) && entity_b.1.is_some() {
-                                    Some(self.countries.get_index(entity_b.1.unwrap() as usize).unwrap().0)
-                                } else { None })))
-                            .then((if keys.contains(&GroupKeys::Interests) && entity_a.2.is_some() {
-                                Some(self.interests.get_index(*entity_a.2.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
-                                    Some(self.interests.get_index(*entity_b.2.unwrap() as usize).unwrap().0)
-                                } else { None })))
-                            .then(if keys.contains(&GroupKeys::Sex) {entity_a.3.cmp(&entity_b.3)} else {Equal})
-                            .then(if keys.contains(&GroupKeys::Status) {entity_a.4.cmp(&entity_b.4)} else {Equal})
-                    ,
-                    Order::Desc =>
-                        count_a.cmp(count_b).reverse()
-                            .then((if keys.contains(&GroupKeys::City) && entity_a.0.is_some() {
-                                Some(self.cities.get_index(entity_a.0.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::City) && entity_b.0.is_some() {
-                                    Some(self.cities.get_index(entity_b.0.unwrap() as usize).unwrap().0)
-                                } else { None })).reverse())
-                            .then((if keys.contains(&GroupKeys::Country) && entity_a.1.is_some() {
-                                Some(self.countries.get_index(entity_a.1.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::Country) && entity_b.1.is_some() {
-                                    Some(self.countries.get_index(entity_b.1.unwrap() as usize).unwrap().0)
-                                } else { None })).reverse())
-                            .then((if keys.contains(&GroupKeys::Interests) && entity_a.2.is_some() {
-                                Some(self.interests.get_index(*entity_a.2.unwrap() as usize).unwrap().0)
-                            } else { None })
-                                .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
-                                    Some(self.interests.get_index(*entity_b.2.unwrap() as usize).unwrap().0)
-                                } else { None })).reverse())
-                            .then(if keys.contains(&GroupKeys::Sex) {entity_a.3.cmp(&entity_b.3).reverse()} else {Equal})
-                            .then(if keys.contains(&GroupKeys::Status) {entity_a.4.cmp(&entity_b.4).reverse()} else {Equal})
-                })
-                .take(group_filters.limit) {
-                let mut group = HashMap::new();
-                group.insert("count", json!(count));
-                if keys.contains(&GroupKeys::City) {
-                    if let Some(val) = entity.0 {
-                        group.insert("city", json!(self.cities.get_index(val as usize).unwrap().0));
+                    .sorted_by(|(entity_a, count_a), (entity_b, count_b)| match group_filters.order {
+                        Order::Asc =>
+                            count_a.cmp(count_b)
+                                .then((if keys.contains(&GroupKeys::City) && entity_a.0.is_some() {
+                                    Some(self.cities.get_index(entity_a.0.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::City) && entity_b.0.is_some() {
+                                        Some(self.cities.get_index(entity_b.0.unwrap() as usize).unwrap().0)
+                                    } else { None })))
+                                .then((if keys.contains(&GroupKeys::Country) && entity_a.1.is_some() {
+                                    Some(self.countries.get_index(entity_a.1.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::Country) && entity_b.1.is_some() {
+                                        Some(self.countries.get_index(entity_b.1.unwrap() as usize).unwrap().0)
+                                    } else { None })))
+                                .then((if keys.contains(&GroupKeys::Interests) && entity_a.2.is_some() {
+                                    Some(self.interests.get_index(*entity_a.2.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
+                                        Some(self.interests.get_index(*entity_b.2.unwrap() as usize).unwrap().0)
+                                    } else { None })))
+                                .then(if keys.contains(&GroupKeys::Sex) { entity_a.3.cmp(&entity_b.3) } else { Equal })
+                                .then(if keys.contains(&GroupKeys::Status) { entity_a.4.cmp(&entity_b.4) } else { Equal })
+                        ,
+                        Order::Desc =>
+                            count_a.cmp(count_b).reverse()
+                                .then((if keys.contains(&GroupKeys::City) && entity_a.0.is_some() {
+                                    Some(self.cities.get_index(entity_a.0.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::City) && entity_b.0.is_some() {
+                                        Some(self.cities.get_index(entity_b.0.unwrap() as usize).unwrap().0)
+                                    } else { None })).reverse())
+                                .then((if keys.contains(&GroupKeys::Country) && entity_a.1.is_some() {
+                                    Some(self.countries.get_index(entity_a.1.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::Country) && entity_b.1.is_some() {
+                                        Some(self.countries.get_index(entity_b.1.unwrap() as usize).unwrap().0)
+                                    } else { None })).reverse())
+                                .then((if keys.contains(&GroupKeys::Interests) && entity_a.2.is_some() {
+                                    Some(self.interests.get_index(*entity_a.2.unwrap() as usize).unwrap().0)
+                                } else { None })
+                                    .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
+                                        Some(self.interests.get_index(*entity_b.2.unwrap() as usize).unwrap().0)
+                                    } else { None })).reverse())
+                                .then(if keys.contains(&GroupKeys::Sex) { entity_a.3.cmp(&entity_b.3).reverse() } else { Equal })
+                                .then(if keys.contains(&GroupKeys::Status) { entity_a.4.cmp(&entity_b.4).reverse() } else { Equal })
+                    })
+                    .take(group_filters.limit) {
+                    let mut group = HashMap::new();
+                    group.insert("count", json!(count));
+                    if keys.contains(&GroupKeys::City) {
+                        if let Some(val) = entity.0 {
+                            group.insert("city", json!(self.cities.get_index(val as usize).unwrap().0));
+                        }
                     }
-                }
-                if keys.contains(&GroupKeys::Country) {
-                    if let Some(val) = entity.1 {
-                        group.insert("country", json!(self.countries.get_index(val as usize).unwrap().0));
+                    if keys.contains(&GroupKeys::Country) {
+                        if let Some(val) = entity.1 {
+                            group.insert("country", json!(self.countries.get_index(val as usize).unwrap().0));
+                        }
                     }
-                }
-                if keys.contains(&GroupKeys::Interests) {
-                    if let Some(val) = entity.2 {
-                        group.insert("interests", json!(self.interests.get_index(*val as usize).unwrap().0));
+                    if keys.contains(&GroupKeys::Interests) {
+                        if let Some(val) = entity.2 {
+                            group.insert("interests", json!(self.interests.get_index(*val as usize).unwrap().0));
+                        }
                     }
-                }
-                if keys.contains(&GroupKeys::Sex) {
-                    group.insert("sex", json!(entity.3));
-                }
-                if keys.contains(&GroupKeys::Status) {
-                    group.insert("status", json!(entity.4));
+                    if keys.contains(&GroupKeys::Sex) {
+                        group.insert("sex", json!(entity.3));
+                    }
+                    if keys.contains(&GroupKeys::Status) {
+                        group.insert("status", json!(entity.4));
+                    }
+
+                    result_groups.push(group);
                 }
 
-                result_groups.push(group);
+                Ok(json!({"groups": result_groups}))
+            } else {
+            if group_filters.birth.is_some() {
+                return Ok(json!({"groups": []}));
             }
 
-            Ok(json!({"groups": result_groups}))
-        } else {
             let mut group_keys = vec![];
             let mut filters_fns: Vec<Box<Fn(&GroupKey) -> bool>> = vec![];
 
-            if keys.contains(&GroupKeys::City) || group_filters.city.is_some() {
-                group_keys.push(GroupKeys::City);
-            }
-            if keys.contains(&GroupKeys::Country) || group_filters.country.is_some() {
-                group_keys.push(GroupKeys::Country);
-            }
-            if keys.contains(&GroupKeys::Interests) || group_filters.interests.is_some() {
-                group_keys.push(GroupKeys::Interests);
-            }
+            if keys.contains(&GroupKeys::City)
+                || group_filters.city.is_some()
+                {
+                    group_keys.push(GroupKeys::City);
+                }
+            if keys.contains(&GroupKeys::Country)
+                || group_filters.country.is_some()
+                {
+                    group_keys.push(GroupKeys::Country);
+                }
+            if keys.contains(&GroupKeys::Interests)
+                || group_filters.interests.is_some()
+                {
+                    group_keys.push(GroupKeys::Interests);
+                }
             group_keys.push(GroupKeys::Sex);
             group_keys.push(GroupKeys::Status);
+            if group_filters.joined.is_some() {
+                group_keys.push(GroupKeys::Joined);
+            }
 
             if let Some(val) = &group_filters.city {
                 if let Some((number, _, _)) = self.cities.get_full(val) {
@@ -1816,6 +2148,10 @@ impl DataBase {
                 filters_fns.push(Box::new(move |gk: &GroupKey| &gk.4 == val));
             }
 
+            if let Some(val) = &group_filters.joined {
+                filters_fns.push(Box::new(move |gk: &GroupKey| gk.5 == Some(*val)));
+            }
+
             let city_key_func: fn(Option<u16>) -> Option<u16> = {
                 if keys.contains(&GroupKeys::City) {
                     |e: Option<u16>| e
@@ -1823,6 +2159,7 @@ impl DataBase {
                     |_| None
                 }
             };
+
             let country_key_func: fn(Option<u16>) -> Option<u16> = {
                 if keys.contains(&GroupKeys::Country) {
                     |e: Option<u16>| e
@@ -1857,7 +2194,14 @@ impl DataBase {
             if let Some(group) = self.groups.get(&group_keys) {
                 for (entity, count) in group
                     .iter()
-                    .filter(|(_, count)| **count > 0)
+                    .filter(|(_, count)| **count > 0
+//                        && {
+//                        if keys.contains(&GroupKeys::City) && entity_a.0.is_none() {false}
+//                        else if keys.contains(&GroupKeys::Country) && entity.1.is_none() {false}
+//                        else if keys.contains(&GroupKeys::Interests) && entity.2.is_none() {false}
+//                        else { true }
+//                    }
+                    )
                     .filter(|(key, _)| filters_fns.iter().all(|f| f(&key)))
                     .sorted_by(|(entity_a, _), (entity_b, _)|
                         (
@@ -1913,8 +2257,8 @@ impl DataBase {
                                     .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
                                         Some(self.interests.get_index(entity_b.2.unwrap() as usize).unwrap().0)
                                     } else { None })))
-                                .then(if keys.contains(&GroupKeys::Sex) {entity_a.3.cmp(&entity_b.3)} else {Equal})
-                                .then(if keys.contains(&GroupKeys::Status) {entity_a.4.cmp(&entity_b.4)} else {Equal})
+                                .then(if keys.contains(&GroupKeys::Sex) { entity_a.3.cmp(&entity_b.3) } else { Equal })
+                                .then(if keys.contains(&GroupKeys::Status) { entity_a.4.cmp(&entity_b.4) } else { Equal })
                         ,
                         Order::Desc =>
                             count_a.cmp(count_b).reverse()
@@ -1936,8 +2280,8 @@ impl DataBase {
                                     .cmp(&(if keys.contains(&GroupKeys::Interests) && entity_b.2.is_some() {
                                         Some(self.interests.get_index(entity_b.2.unwrap() as usize).unwrap().0)
                                     } else { None })).reverse())
-                                .then(if keys.contains(&GroupKeys::Sex) {entity_a.3.cmp(&entity_b.3).reverse()} else {Equal})
-                                .then(if keys.contains(&GroupKeys::Status) {entity_a.4.cmp(&entity_b.4).reverse()} else {Equal})
+                                .then(if keys.contains(&GroupKeys::Sex) { entity_a.3.cmp(&entity_b.3).reverse() } else { Equal })
+                                .then(if keys.contains(&GroupKeys::Status) { entity_a.4.cmp(&entity_b.4).reverse() } else { Equal })
                     })
                     .take(group_filters.limit) {
                     let mut group = HashMap::new();
@@ -2016,8 +2360,8 @@ struct Account {
     email: String,
     phone: Option<String>,
     premium: Option<Premium>,
-    interests: Vec<u16>,
-    //    likes: Vec<Likes>,
+    interests: Vec<u16>, // 64M
+//    likes: Vec<Likes>,
 }
 
 #[serde(deny_unknown_fields)]
@@ -2189,6 +2533,7 @@ enum GroupKeys {
     Country,
     #[serde(rename = "city")]
     City,
+    Joined,
 }
 
 #[serde(deny_unknown_fields)]
@@ -2475,3 +2820,6 @@ fn memory_info() {
 
 // interests - 86
 // accs - 404
+
+// 2844M with stupid groups index (len 11915127)
+// 3088M with clever groups index Oo
