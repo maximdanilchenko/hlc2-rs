@@ -8,7 +8,6 @@ extern crate zip;
 #[macro_use]
 extern crate validator_derive;
 extern crate chrono;
-extern crate fnv;
 extern crate indexmap;
 extern crate itertools;
 extern crate sys_info;
@@ -27,20 +26,19 @@ use std::fs::File;
 use std::sync::{Arc, Mutex};
 
 use std::thread;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use std::mem;
-use std::iter::FromIterator;
 use std::cmp::Ordering::Equal;
 
 use actix_web::http::{header, Method, StatusCode};
-use actix_web::{error, server, App, HttpResponse, Json, Path, Query, State};
+use actix_web::{error, server, App, HttpResponse, Json, Path, Query, State,
+                Responder, Result, HttpRequest};
 use itertools::Itertools;
 use validator::Validate;
-use futures::future::{result, FutureResult};
-//use flat_map::FlatMap;
+use futures::Future;
+use actix_web::dev::AsyncResult;
 
 use chrono::{TimeZone, Utc, Local, Datelike};
-use fnv::{FnvHashMap, FnvHashSet};
 use indexmap::{IndexMap, IndexSet};
 
 use smallvec::SmallVec;
@@ -52,231 +50,8 @@ struct AppState {
     database: Arc<RwLock<DataBase>>,
 }
 
-// city, country, interest, sex, status
 type GroupKey = (Option<u16>, Option<u16>, Option<u16>, Sex, Status, Option<u32>);
 
-type Pair = (u8, u32);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum GK {
-    City(Option<u16>),
-    Country(Option<u16>),
-    Interest(Option<u16>),
-    Sex(Sex),
-    Status(Status),
-    Joined(Option<u16>),
-//    Birth(Option<u16>),
-}
-
-struct GroupIndex {
-    groups: hashbrown::HashMap<Vec<GroupKeys>, hashbrown::HashMap<Vec<GK>, u32>>
-}
-
-impl GroupIndex {
-    fn new() -> GroupIndex {
-        GroupIndex { groups: hashbrown::HashMap::new() }
-    }
-
-    fn add(&mut self, acc: &Account, joined: Option<u16>, birth: Option<u16>) {
-        for key in [
-            vec![GroupKeys::Sex, GroupKeys::Status],
-            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status],
-            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
-            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
-            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-        ].iter() {
-            *self.groups.entry(key.clone())
-                .or_insert(hashbrown::HashMap::new())
-                .entry(key.iter().map(|k| match k {
-                    GroupKeys::City => GK::City(acc.city),
-                    GroupKeys::Country => GK::Country(acc.country),
-                    GroupKeys::Interests => GK::Interest(None),
-                    GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-                    GroupKeys::Status => GK::Status(acc.status.clone()),
-                    GroupKeys::Joined => GK::Joined(joined),
-//                     GroupKeys::Birth => GK::Birth(birth),
-                }).collect())
-                .or_insert(0) += 1;
-        }
-
-        if acc.interests.is_empty() {
-            for key in [
-                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-            ].iter() {
-                *self.groups.entry(key.clone())
-                    .or_insert(hashbrown::HashMap::new())
-                    .entry(key.iter().map(|k| match k {
-                        GroupKeys::City => GK::City(acc.city),
-                        GroupKeys::Country => GK::Country(acc.country),
-                        GroupKeys::Interests => GK::Interest(None),
-                        GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-                        GroupKeys::Status => GK::Status(acc.status.clone()),
-                        GroupKeys::Joined => GK::Joined(joined),
-//                         GroupKeys::Birth => GK::Birth(birth),
-                    }).collect())
-                    .or_insert(0) += 1;
-            }
-        } else {
-            for interest in &acc.interests {
-                for key in [
-                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-                ].iter() {
-                    *self.groups.entry(key.clone())
-                        .or_insert(hashbrown::HashMap::new())
-                        .entry(key.iter().map(|k| match k {
-                            GroupKeys::City => GK::City(acc.city),
-                            GroupKeys::Country => GK::Country(acc.country),
-                            GroupKeys::Interests => GK::Interest(Some(interest.clone())),
-                            GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-                            GroupKeys::Status => GK::Status(acc.status.clone()),
-                            GroupKeys::Joined => GK::Joined(joined),
-//                            GroupKeys::Birth => GK::Birth(birth),
-                        }).collect())
-                        .or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-//    fn remove(&mut self, acc: &Account, joined: Option<u16>, birth: Option<u16>) {
-//        for key in [
-//            vec![GroupKeys::Sex, GroupKeys::Status],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status],
-//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//            vec![GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//        ].iter() {
-//             self.groups.entry(key.clone())
-//                 .and_modify(|group| {group
-//                         .entry(key.iter().map(|k| match k {
-//                             GroupKeys::City => GK::City(acc.city),
-//                             GroupKeys::Country => GK::Country(acc.country),
-//                             GroupKeys::Interests => GK::Interest(None),
-//                             GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-//                             GroupKeys::Status => GK::Status(acc.status.clone()),
-//                             GroupKeys::Joined => GK::Joined(joined),
-//                             GroupKeys::Birth => GK::Birth(birth),
-//                         }).collect())
-//                     .and_modify(|entry| *entry -= 1);});
-//        }
-//
-//        if acc.interests.is_empty() {
-//            for key in [
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//            ].iter() {
-//                 self.groups.entry(key.clone())
-//                     .and_modify(|group| {group
-//                             .entry(key.iter().map(|k| match k {
-//                                 GroupKeys::City => GK::City(acc.city),
-//                                 GroupKeys::Country => GK::Country(acc.country),
-//                                 GroupKeys::Interests => GK::Interest(None),
-//                                 GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-//                                 GroupKeys::Status => GK::Status(acc.status.clone()),
-//                                 GroupKeys::Joined => GK::Joined(joined),
-//                                 GroupKeys::Birth => GK::Birth(birth),
-//                             }).collect())
-//                         .and_modify(|entry| *entry -= 1);});
-//            }
-//        } else {
-//            for interest in &acc.interests {
-//                for key in [
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status],
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined],
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Birth],
-//                    vec![GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                    vec![GroupKeys::City, GroupKeys::Country, GroupKeys::Interests, GroupKeys::Sex, GroupKeys::Status, GroupKeys::Joined, GroupKeys::Birth],
-//                ].iter() {
-//                    self.groups.entry(key.clone())
-//                        .and_modify(|group| {group
-//                                .entry(key.iter().map(|k| match k {
-//                                    GroupKeys::City => GK::City(acc.city),
-//                                    GroupKeys::Country => GK::Country(acc.country),
-//                                    GroupKeys::Interests => GK::Interest(Some(interest.clone())),
-//                                    GroupKeys::Sex => GK::Sex(acc.sex.clone()),
-//                                    GroupKeys::Status => GK::Status(acc.status.clone()),
-//                                    GroupKeys::Joined => GK::Joined(joined),
-//                                    GroupKeys::Birth => GK::Birth(birth),
-//                                }).collect())
-//                            .and_modify(|entry| *entry -= 1);});
-//                }
-//            }
-//        }
-//    }
-}
 
 struct DataBase {
     accounts: BTreeMap<u32, Account>,
@@ -285,9 +60,7 @@ struct DataBase {
     cities: IndexMap<String, BTreeSet<u32>>,
     emails: hashbrown::HashSet<String>,
     phone_codes: IndexSet<String>,
-    //, BTreeSet<u32>>,
     email_domains: IndexSet<String>,
-    //, BTreeSet<u32>>,
     fnames: IndexMap<String, BTreeSet<u32>>,
     snames: IndexMap<String, BTreeSet<u32>>,
 
@@ -301,7 +74,6 @@ struct DataBase {
 
     groups: hashbrown::HashMap<Vec<GroupKeys>, hashbrown::HashMap<GroupKey, u32>>,
 
-    group_index: GroupIndex,
     given_time: Option<u32>,
 
     premium_now: BTreeSet<u32>,
@@ -352,7 +124,6 @@ impl DataBase {
             liked: hashbrown::HashMap::new(),
 
             groups,
-            group_index: GroupIndex::new(),
 
             given_time: None,
 
@@ -369,6 +140,18 @@ impl DataBase {
         let now = Instant::now();
 
         let mut database = DataBase::new();
+
+        let opts = File::open("options.txt");
+        if let Ok(f) = opts {
+            let file = BufReader::new(&f);
+            let mut lines = vec![];
+            for line in file.lines() {
+                let l = line.unwrap();
+                println!("{}", l);
+                lines.push(l);
+            }
+            database.given_time = Some(lines[0].parse().unwrap());
+        }
         let accounts_arc: Arc<Mutex<Vec<AccountFull>>> =
             Arc::new(Mutex::new(Vec::with_capacity(1300000)));
         {
@@ -426,7 +209,7 @@ impl DataBase {
         let mut accs = accounts_arc.lock().unwrap();
         for index in 0..1000 {
             for account in accs.drain(0..10000) {
-                match database.insert(account, false) {
+                match database.insert_sync(account) {
                     Err(_) => println!("Error while inserting"),
                     Ok(_) => (),
                 }
@@ -456,7 +239,6 @@ impl DataBase {
         database.emails.shrink_to_fit();
         database.likes.shrink_to_fit();
         database.liked.shrink_to_fit();
-//        println!("{:?}", database.groups);
 
         if database.accounts.len() > 1000000 {
             database.raiting = true;
@@ -507,21 +289,19 @@ impl DataBase {
 
             accounts = serde_json::from_str(data.as_ref()).unwrap();
             for account in accounts.remove("accounts").unwrap() {
-                database.insert(account, false).unwrap();
+                database.insert_sync(account).unwrap();
             }
             database.likes.shrink_to_fit();
         }
 
         println!("Done! Elapsed {} secs from start.", now.elapsed().as_secs());
         database.print_len();
-//        println!("{:?}", database.groups);
 
         database.joined_index.shrink_to_fit();
         database.birth_index.shrink_to_fit();
         database.emails.shrink_to_fit();
         database.likes.shrink_to_fit();
         database.liked.shrink_to_fit();
-//        database.accounts.sort_keys();
 
         database
     }
@@ -776,10 +556,6 @@ impl DataBase {
         let vec: Vec<&str> = mail.split('@').collect();
         if let Some(domain) = vec.get(1) {
             self.email_domains.insert_full(domain.to_string()).0 as u16
-//                .entry(domain.to_string())
-//                .or_insert(BTreeSet::new())
-//                .insert(uid);
-//            self.email_domains.get_full(&domain.to_string()).unwrap().0 as u16
         } else {
             0
         }
@@ -793,31 +569,31 @@ impl DataBase {
         self.interests.get_full(&interest).unwrap().0 as u16
     }
 
-    fn update_account(&mut self, uid: u32, account: AccountOptional) -> Result<u32, StatusCode> {
+    fn update_account(&mut self, uid: u32, account: AccountOptional, req: HttpRequest<AppState>) -> Result<AsyncResult<HttpResponse>> {
         let mut new_account = match self.accounts.get_mut(&uid) {
             Some(account) => account,
-            None => return Err(StatusCode::NOT_FOUND),
+            None => return Ok(HttpResponse::build(StatusCode::NOT_FOUND)
+                .content_type("application/json")
+                .header(header::CONNECTION, "keep-alive")
+                .header(header::SERVER, "highload")
+                .finish().respond_to(&req)?),
         };
         let old_account = new_account.clone();
         let (new_account, joined_year, birth_year) = {
             if let Some(email) = account.email {
                 if self.emails.contains(&email) {
                     if email != new_account.email {
-                        return Err(StatusCode::BAD_REQUEST);
+                        return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                            .content_type("application/json")
+                            .header(header::CONNECTION, "keep-alive")
+                            .header(header::SERVER, "highload")
+                            .finish().respond_to(&req)?);
                     }
                 } else {
                     let vec: Vec<&str> = email.split('@').collect();
                     new_account.email_domain = match vec.get(1) {
                         Some(domain) => {
-//                            if let Some((_, v)) = self.email_domains.get_index_mut(new_account.email_domain as usize)
-//                                {
-//                                    v.remove(&uid);
-//                                }
                             self.email_domains.insert_full(domain.to_string()).0 as u16
-//                                .entry(domain.to_string())
-//                                .or_insert(BTreeSet::new())
-//                                .insert(uid);
-//                            self.email_domains.get_full(&domain.to_string()).unwrap().0 as u16
                         }
                         None => 0,
                     };
@@ -838,13 +614,6 @@ impl DataBase {
                 new_account.phone_code = match phone.get(2..5) {
                     Some(phone_code) => Some({
                         self.phone_codes.insert_full(phone_code.to_string()).0 as u16
-//                            .entry(phone_code.to_string())
-//                            .or_insert(BTreeSet::new())
-//                            .insert(uid);
-//                        self.phone_codes
-//                            .get_full(&phone_code.to_string())
-//                            .unwrap()
-//                            .0 as u16
                     }),
                     None => None,
                 };
@@ -903,7 +672,6 @@ impl DataBase {
                         .push((uid, like.ts));
                     liked.push(like.id);
                 }
-//            new_account.likes.extend(likes);
             };
 
             if let Some(country) = account.country {
@@ -987,28 +755,182 @@ impl DataBase {
             };
             (new_account.clone(), joined_year, birth_year)
         };
-
-        self.subtract_from_group(&old_account, Some(joined_year), Some(birth_year));
-        self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
-        Ok(uid)
+        Ok(HttpResponse::Accepted()
+            .content_type("application/json")
+            .body("{}").respond_to(&req).and_then(|r| {
+            self.subtract_from_group(&old_account, Some(joined_year), Some(birth_year));
+            self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
+            Ok(r)
+        })?)
     }
 
-    fn insert(&mut self, account: AccountFull, with_unique: bool) -> Result<u32, StatusCode> {
+    fn insert(&mut self, account: AccountFull, req: HttpRequest<AppState>) -> Result<AsyncResult<HttpResponse>> {
         if self.post_phase == 0 {
             self.post_phase = 1;
         }
 
         let uid = account.id;
 
-        if with_unique {
-            if let true = self.accounts.contains_key(&uid) {
-                return Err(StatusCode::BAD_REQUEST);
+        if let true = self.accounts.contains_key(&uid) {
+            return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .content_type("application/json")
+                .header(header::CONNECTION, "keep-alive")
+                .header(header::SERVER, "highload")
+                .finish().respond_to(&req)?);
+        };
+
+        if self.emails.contains(&account.email) {
+            return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                .content_type("application/json")
+                .header(header::CONNECTION, "keep-alive")
+                .header(header::SERVER, "highload")
+                .finish().respond_to(&req)?);
+        };
+
+
+        Ok(HttpResponse::Created()
+            .content_type("application/json")
+            .body("{}").respond_to(&req).and_then(|r| {
+            if let Some(likes) = account.likes {
+                for like in likes {
+                    self.likes.entry(like.id)
+                        .or_insert(Vec::new())
+                        .push((uid, like.ts));
+                    self.liked.entry(uid)
+                        .or_insert(Vec::new())
+                        .push(like.id);
+                }
+            }
+
+            let city = match account.city {
+                Some(city) => Some({
+                    self.cities
+                        .entry(city.to_string())
+                        .or_insert(BTreeSet::new())
+                        .insert(uid);
+                    self.cities.get_full(&city.to_string()).unwrap().0 as u16
+                }),
+                None => {
+                    None
+                }
             };
 
-            if self.emails.contains(&account.email) {
-                return Err(StatusCode::BAD_REQUEST);
+            let sname = match account.sname {
+                Some(sname) => Some({
+                    self.snames
+                        .entry(sname.to_string())
+                        .or_insert(BTreeSet::new())
+                        .insert(uid);
+                    self.snames_index.insert(sname.clone());
+                    self.snames.get_full(&sname.to_string()).unwrap().0 as u16
+                }),
+                None => {
+                    None
+                }
             };
+
+            let fname = match account.fname {
+                Some(fname) => Some({
+                    self.fnames
+                        .entry(fname.to_string())
+                        .or_insert(BTreeSet::new())
+                        .insert(uid);
+                    self.fnames.get_full(&fname.to_string()).unwrap().0 as u16
+                }),
+                None => {
+                    None
+                }
+            };
+
+            let country = match account.country {
+                Some(country) => Some({
+                    self.countries
+                        .entry(country.to_string())
+                        .or_insert(BTreeSet::new())
+                        .insert(uid);
+                    self.countries.get_full(&country.to_string()).unwrap().0 as u16
+                }),
+                None => {
+                    None
+                }
+            };
+
+            let phone_code = match &account.phone {
+                Some(phone) => match phone.get(2..5) {
+                    Some(phone_code) => Some({
+                        self.phone_codes.insert_full(phone_code.to_string()).0 as u16
+                    }),
+                    None => None,
+                },
+                None => {
+                    None
+                }
+            };
+
+            let interests: Vec<u16> = match account.interests {
+                Some(vec) => vec
+                    .into_iter()
+                    .map(|interest| self.insert_to_interests(interest, uid))
+                    .collect(),
+                None => Vec::new(),
+            };
+
+            self.emails.insert(account.email.clone());
+            let email_domain = self.insert_to_domains(account.email.clone(), uid);
+
+            if let Some(premium) = &account.premium {
+                if let Some(now) = self.given_time {
+                    if premium.start <= now && premium.finish >= now {
+                        self.premium_now.insert(uid);
+                    } else {
+                        self.premium_now.remove(&uid);
+                    }
+                }
+            }
+
+            let birth_year = Utc.timestamp(account.birth as i64, 0).year() as u32;
+            self.birth_index
+                .entry(birth_year)
+                .or_insert(BTreeSet::new())
+                .insert(uid);
+
+            let joined_year = Utc.timestamp(account.joined as i64, 0).year() as u32;
+            self.joined_index
+                .entry(joined_year)
+                .or_insert(BTreeSet::new())
+                .insert(uid);
+
+            let new_account = Account {
+                email: account.email,
+                fname,
+                sname,
+                phone: account.phone,
+                sex: account.sex,
+                birth: account.birth,
+                joined: account.joined,
+                status: account.status,
+                premium: account.premium,
+                country,
+                city,
+                interests,
+                phone_code,
+                email_domain,
+            };
+            self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
+            self.accounts.insert(
+                uid,
+                new_account,
+            );
+            Ok(r)
+        })?)
+    }
+
+    fn insert_sync(&mut self, account: AccountFull) -> Result<()> {
+        if self.post_phase == 0 {
+            self.post_phase = 1;
         }
+
+        let uid = account.id;
 
         if let Some(likes) = account.likes {
             for like in likes {
@@ -1078,13 +1000,6 @@ impl DataBase {
             Some(phone) => match phone.get(2..5) {
                 Some(phone_code) => Some({
                     self.phone_codes.insert_full(phone_code.to_string()).0 as u16
-//                        .entry(phone_code.to_string())
-//                        .or_insert(BTreeSet::new())
-//                        .insert(uid);
-//                    self.phone_codes
-//                        .get_full(&phone_code.to_string())
-//                        .unwrap()
-//                        .0 as u16
                 }),
                 None => None,
             },
@@ -1143,32 +1058,36 @@ impl DataBase {
             email_domain,
         };
         self.add_to_group(&new_account, Some(joined_year), Some(birth_year));
-//        self.group_index.add(&new_account, Some(joined_year as u16), Some(birth_year as u16));
         self.accounts.insert(
             uid,
             new_account,
         );
-
-        Ok(uid)
+        Ok(())
     }
 
-    fn update_likes(&mut self, likes: LikesRequest) -> Result<(), StatusCode> {
+    fn update_likes(&mut self, likes: LikesRequest, req: HttpRequest<AppState>) -> Result<AsyncResult<HttpResponse>> {
         for like in likes.likes.iter() {
             if !self.accounts.contains_key(&like.likee) || !self.accounts.contains_key(&like.liker) {
-                return Err(StatusCode::BAD_REQUEST);
+                return Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .content_type("application/json")
+                    .header(header::CONNECTION, "keep-alive")
+                    .header(header::SERVER, "highload")
+                    .finish().respond_to(&req)?);
             }
         }
-
-        for like in likes.likes.iter() {
-            self.likes.entry(like.likee)
-                .or_insert(Vec::new())
-                .push((like.liker, like.ts));
-            self.liked.entry(like.liker)
-                .or_insert(Vec::new())
-                .push(like.likee);
-        }
-
-        Ok(())
+        Ok(HttpResponse::Accepted()
+            .content_type("application/json")
+            .body("{}").respond_to(&req).and_then(|r| {
+            for like in likes.likes.iter() {
+                self.likes.entry(like.likee)
+                    .or_insert(Vec::new())
+                    .push((like.liker, like.ts));
+                self.liked.entry(like.liker)
+                    .or_insert(Vec::new())
+                    .push(like.likee);
+            }
+            Ok(r)
+        })?)
     }
 
     fn filter(&self, filters: Filters) -> Result<serde_json::Value, ()> {
@@ -1176,7 +1095,6 @@ impl DataBase {
             // ФИЛЬТРЫ ЧЕРЕЗ ИНДЕКСЫ
 
             let mut indexes = SmallVec::<[&BTreeSet<u32>; 4]>::new();
-//            let mut main_index: Option<&BTreeSet<u32>> = None;
             let mut indexes_options = Vec::new();
             let mut indexes_likes: Vec<BTreeSet<&u32>> = Vec::new();
             let mut filters_fns = SmallVec::<[Box<Fn(&Account) -> bool>; 4]>::new();
@@ -1348,22 +1266,22 @@ impl DataBase {
 
             // ФИЛЬТРЫ ЧЕРЕЗ ПЕРЕБОР
 
-            match &filters.country_null {
-                Some(1) => {
-                    filters_fns.push(Box::new(move |acc: &Account| acc.country.is_none()));
-                }
-                Some(0) => {
-                    filters_fns.push(Box::new(move |acc: &Account| acc.country.is_some()));
-                }
-                _ => (),
-            }
-
             match &filters.city_null {
                 Some(1) => {
                     filters_fns.push(Box::new(move |acc: &Account| acc.city.is_none()));
                 }
                 Some(0) => {
                     filters_fns.push(Box::new(move |acc: &Account| acc.city.is_some()));
+                }
+                _ => (),
+            }
+
+            match &filters.country_null {
+                Some(1) => {
+                    filters_fns.push(Box::new(move |acc: &Account| acc.country.is_none()));
+                }
+                Some(0) => {
+                    filters_fns.push(Box::new(move |acc: &Account| acc.country.is_some()));
                 }
                 _ => (),
             }
@@ -1497,23 +1415,24 @@ impl DataBase {
 
             // ФИЛЬТРАЦИЯ
             {
-                if let Some(min) = indexes.pop() {
+                if let Some(likes) = indexes_likes.pop() {
+                    likes
+                        .iter()
+                        .rev()
+                        .filter(|uid| indexes.iter().all(|i| i.contains(uid)))
+                        .filter(|uid| indexes_likes.iter().all(|i| i.contains(*uid)))
+                        .map(|k| (*k, self.accounts.get(k).unwrap()))
+                        .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
+                        .filter(|(uid, _)| if indexes_options.is_empty() { true } else { indexes_options.iter().any(|i| i.contains(uid)) })
+                        .take(filters.limit)
+                        .collect()
+                } else if let Some(min) = indexes.pop() {
                     min
                         .iter()
                         .rev()
                         .filter(|uid| indexes.iter().all(|i| i.contains(uid)))
                         .filter(|uid| indexes_likes.iter().all(|i| i.contains(uid)))
                         .map(|k| (k, self.accounts.get(k).unwrap()))
-                        .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
-                        .filter(|(uid, _)| if indexes_options.is_empty() { true } else { indexes_options.iter().any(|i| i.contains(uid)) })
-                        .take(filters.limit)
-                        .collect()
-                } else if let Some(likes) = indexes_likes.pop() {
-                    likes
-                        .iter()
-                        .rev()
-                        .filter(|uid| indexes_likes.iter().all(|i| i.contains(*uid)))
-                        .map(|k| (*k, self.accounts.get(k).unwrap()))
                         .filter(|(_, acc)| filters_fns.iter().all(|f| f(&acc)))
                         .filter(|(uid, _)| if indexes_options.is_empty() { true } else { indexes_options.iter().any(|i| i.contains(uid)) })
                         .take(filters.limit)
@@ -1533,7 +1452,6 @@ impl DataBase {
         // ФОРМИРОВАНИЕ РЕЗУЛЬТАТОВ
 
         let mut result = Vec::with_capacity(filters.limit);
-
 
         for (id, acc) in end_ids.into_iter().rev() {
             let mut elem = HashMap::new();
@@ -1682,9 +1600,82 @@ impl DataBase {
             return Ok(json!({"accounts": []}));
         }
 
+        let filter_func: Box<Fn(&Account) -> bool> = {
+            if let Some(city) = suggest_filters.city {
+                if let Some((number, _, _)) = self.cities.get_full(&city) {
+                    let number = Some(number as u16);
+                    let sex = if account.sex == Sex::F { Sex::M } else { Sex::F };
+                    Box::new(move |acc: &Account| (acc.city == number && acc.sex == sex))
+                } else {
+                    return Ok(json!({"accounts": []}));
+                }
+            } else if let Some(country) = suggest_filters.country {
+                if let Some((number, _, _)) = self.countries.get_full(&country) {
+                    let number = Some(number as u16);
+                    let sex = if account.sex == Sex::F { Sex::M } else { Sex::F };
+                    Box::new(move |acc: &Account| (acc.country == number && acc.sex == sex))
+                } else {
+                    return Ok(json!({"accounts": []}));
+                }
+            } else {
+                let sex = if account.sex == Sex::F { Sex::M } else { Sex::F };
+                Box::new(move |acc: &Account| acc.sex == sex)
+            }
+        };
 
+        let mut result = Vec::with_capacity(suggest_filters.limit);
 
-        Ok(json!({"accounts": []}))
+        for (uid, account) in account.interests
+            .iter()
+            .filter_map(|ind| self.interests.get_index(*ind as usize))
+            .flat_map(|(_, v)| v)
+            .unique()
+            .map(|u_id| (u_id, self.accounts.get(u_id).unwrap()))
+            .filter(|(_, acc)| filter_func(acc))
+            .sorted_by(|(u_id2, acc2), (u_id1, acc1)|
+                self.premium_now.contains(u_id1).cmp(&self.premium_now.contains(u_id2))
+                    .then((match acc1.status {
+                        Status::Free => 2,
+                        Status::AllHard => 1,
+                        Status::Muted => 0
+                    }).cmp(&(match acc2.status {
+                        Status::Free => 2,
+                        Status::AllHard => 1,
+                        Status::Muted => 0
+                    })))
+                    .then((acc1.interests
+                        .iter()
+                        .map(|s| if account.interests.contains(s) { 1 } else { 0 }).sum::<u8>())
+                        .cmp(&(acc2.interests
+                            .iter()
+                            .map(|s| if account.interests.contains(s) { 1 } else { 0 }).sum::<u8>())))
+                    .then(
+                        ((account.birth as i32) - (acc2.birth as i32)).abs()
+                            .cmp(&((account.birth as i32) - (acc1.birth as i32)).abs()))
+            ).take(suggest_filters.limit) {
+            let mut elem = HashMap::new();
+            elem.insert("id", json!(uid));
+            let acc = self.accounts.get(uid).unwrap();
+            elem.insert("email", json!(acc.email));
+            elem.insert("status", json!(acc.status));
+            elem.insert("birth", json!(acc.birth));
+            if let Some(val) = acc.fname {
+                if let Some((fname, _)) = self.fnames.get_index(val as usize) {
+                    elem.insert("fname", json!(fname));
+                }
+            }
+            if let Some(val) = acc.sname {
+                if let Some((sname, _)) = self.snames.get_index(val as usize) {
+                    elem.insert("sname", json!(sname));
+                }
+            }
+            if let Some(val) = &acc.premium {
+                elem.insert("premium", json!(val));
+            }
+            result.push(elem);
+        }
+
+        Ok(json!({"accounts": result}))
     }
 
     fn suggest(&self, uid: u32, suggest_filters: SuggestRecommend) -> Result<serde_json::Value, StatusCode> {
@@ -2194,14 +2185,7 @@ impl DataBase {
             if let Some(group) = self.groups.get(&group_keys) {
                 for (entity, count) in group
                     .iter()
-                    .filter(|(_, count)| **count > 0
-//                        && {
-//                        if keys.contains(&GroupKeys::City) && entity_a.0.is_none() {false}
-//                        else if keys.contains(&GroupKeys::Country) && entity.1.is_none() {false}
-//                        else if keys.contains(&GroupKeys::Interests) && entity.2.is_none() {false}
-//                        else { true }
-//                    }
-                    )
+                    .filter(|(_, count)| **count > 0)
                     .filter(|(key, _)| filters_fns.iter().all(|f| f(&key)))
                     .sorted_by(|(entity_a, _), (entity_b, _)|
                         (
@@ -2228,13 +2212,6 @@ impl DataBase {
                         )
                     })
                     .into_iter()
-//                    .filter(|(entity, _)|{
-//                        keys.contains(&GroupKeys::Sex) ||
-//                        keys.contains(&GroupKeys::Status) ||
-//                        (keys.contains(&GroupKeys::City) && entity.0.is_some()) ||
-//                        (keys.contains(&GroupKeys::Country) && entity.1.is_some()) ||
-//                        (keys.contains(&GroupKeys::Interests) && entity.2.is_some())
-//                    })
                     .map(|(key, group)| (key, group.map(|(_, v)| v).sum::<u32>()))
                     .sorted_by(|(entity_a, count_a), (entity_b, count_b)| match group_filters.order {
                         Order::Asc =>
@@ -2360,8 +2337,7 @@ struct Account {
     email: String,
     phone: Option<String>,
     premium: Option<Premium>,
-    interests: Vec<u16>, // 64M
-//    likes: Vec<Likes>,
+    interests: Vec<u16>,
 }
 
 #[serde(deny_unknown_fields)]
@@ -2496,20 +2472,15 @@ struct Group {
     #[validate(length(min = "1", max = "50"))]
     sname: Option<String>,
     sex: Option<Sex>,
-    // ++++++
     birth: Option<u32>,
     #[validate(length(min = "1", max = "50"))]
     country: Option<String>,
-    // ++++++
     #[validate(length(min = "1", max = "50"))]
     city: Option<String>,
-    // ++++++
     joined: Option<u32>,
     status: Option<Status>,
-    // ++++++
     #[validate(length(min = "1", max = "100"))]
     interests: Option<String>,
-    // ++++++
     likes: Option<u32>,
 }
 
@@ -2619,78 +2590,36 @@ fn recommend(query: Query<SuggestRecommend>, path: Path<(u32, )>, state: State<A
     }
 }
 
-fn likes(item: Json<LikesRequest>, state: State<AppState>) -> HttpResponse {
+fn likes(req: HttpRequest<AppState>, item: Json<LikesRequest>, state: State<AppState>) -> Result<AsyncResult<HttpResponse>> {
     let mut database = state.database.write();
-    match database.update_likes(item.0) {
-        Ok(_) => HttpResponse::Accepted()
-            .content_type("application/json")
-            .body("{}"),
-        Err(status) => HttpResponse::build(status).content_type("application/json")
-            .header(header::CONNECTION, "keep-alive")
-            .header(header::SERVER, "highload")
-            .finish(),
-    }
+    database.update_likes(item.0, req)
 }
 
-fn update(item: Json<AccountOptional>, path: Path<(u32, )>, state: State<AppState>) -> HttpResponse {
+fn update(req: HttpRequest<AppState>, item: Json<AccountOptional>, path: Path<(u32, )>, state: State<AppState>) -> Result<AsyncResult<HttpResponse>> {
     match item.0.validate() {
         Ok(_) => {
             let mut database = state.database.write();
-            match database.update_account(path.0, item.0) {
-                Ok(_) => HttpResponse::Accepted()
-                    .content_type("application/json")
-                    .body("{}"),
-                Err(status) => HttpResponse::build(status).content_type("application/json")
-                    .header(header::CONNECTION, "keep-alive")
-                    .header(header::SERVER, "highload")
-                    .finish(),
-            }
+            database.update_account(path.0, item.0, req)
         }
-        Err(_) => HttpResponse::BadRequest().content_type("application/json")
+        Err(_) => Ok(HttpResponse::BadRequest().content_type("application/json")
             .header(header::CONNECTION, "keep-alive")
             .header(header::SERVER, "highload")
-            .finish(),
+            .finish().respond_to(&req)?),
     }
 }
 
-fn new(item: Json<AccountFull>, state: State<AppState>) -> HttpResponse {
+fn new(req: HttpRequest<AppState>, item: Json<AccountFull>, state: State<AppState>) -> Result<AsyncResult<HttpResponse>> {
     match item.0.validate() {
         Ok(_) => {
             let mut database = state.database.write();
-            match database.insert(item.0, true) {
-                Ok(_) => HttpResponse::Created()
-                    .content_type("application/json")
-                    .body("{}"),
-                Err(status) => HttpResponse::build(status).content_type("application/json")
-                    .header(header::CONNECTION, "keep-alive")
-                    .header(header::SERVER, "highload")
-                    .finish(),
-            }
+            database.insert(item.0, req)
         }
-        Err(_) => HttpResponse::BadRequest().content_type("application/json")
+        Err(_) => Ok(HttpResponse::BadRequest().content_type("application/json")
             .header(header::CONNECTION, "keep-alive")
             .header(header::SERVER, "highload")
-            .finish(),
+            .finish().respond_to(&req)?),
     }
 }
-
-//fn mmain() {
-////    let mut coll: hashbrown::HashMap<u32, BTreeSet<u32>> = hashbrown::HashMap::new(); // 148M
-////    let mut coll: FnvHashMap<u32, BTreeSet<u32>> = FnvHashMap::default(); // 162M
-////    let mut coll: IndexMap<u32, BTreeSet<u32>> = IndexMap::new(); // 148M
-////    let mut coll: hashbrown::HashMap<u32, hashbrown::HashSet<u32>> = hashbrown::HashMap::new(); // 221M
-////    let mut coll: hashbrown::HashMap<u32, Vec<u32>> = hashbrown::HashMap::new(); // 128M
-//    let mut coll: IndexMap<u32, Vec<u32>> = IndexMap::new(); // 127M
-////    let mut coll: hashbrown::HashMap<u32, Vec<u32>> = hashbrown::HashMap::new(); // 128M
-////    let mut coll: IndexMap<u32, Vec<(u32, i64)>> = IndexMap::new(); // 270M
-//
-//    for i in 0..1300000 {
-//        coll.insert(i, [1,2,3,4,5,6,7,8,9,10].iter().cloned().collect());
-//    }
-//    println!("Done");
-//    thread::sleep(Duration::from_secs(30));
-//    println!("Ended");
-//}
 
 fn main() {
     let prod = env::var("PROD").is_ok();

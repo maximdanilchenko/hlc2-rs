@@ -5,3 +5,4 @@
 .idea*
 *.zip
 options.txt
+clean.sh
